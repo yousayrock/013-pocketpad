@@ -23,23 +23,42 @@ class TrayContext : ApplicationContext
 {
     private readonly NotifyIcon _icon;
 
+    private QrForm? _qrForm;
+
     public TrayContext(WsServer server)
     {
         var menu = new ContextMenuStrip();
-        menu.Items.Add("接続情報を表示", null, (_, _) => ShowInfo(server));
+        menu.Items.Add("接続QRを表示", null, (_, _) => ShowQr(server));
+        menu.Items.Add("接続情報を表示（テキスト）", null, (_, _) => ShowInfo(server));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("終了", null, (_, _) => ExitThread());
 
         _icon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
-            Text = "PocketPad — 未来ガジェット013号",
+            Icon = IconFactory.CreateAppIcon(),
+            Text = "PocketPad — クリックで接続QRを表示",
             Visible = true,
             ContextMenuStrip = menu,
         };
+        // 左クリック（シングル）で即QR表示。右クリックは従来どおりメニュー
+        _icon.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) ShowQr(server);
+        };
         _icon.BalloonTipTitle = "PocketPad 起動";
-        _icon.BalloonTipText = $"ポート {server.Port} で待機中。右クリック→接続情報を表示";
+        _icon.BalloonTipText = "アイコンをクリックすると接続QRが表示されます";
         _icon.ShowBalloonTip(3000);
+    }
+
+    private void ShowQr(WsServer server)
+    {
+        if (_qrForm is { IsDisposed: false })
+        {
+            _qrForm.Activate();
+            return;
+        }
+        _qrForm = new QrForm(server);
+        _qrForm.Show();
     }
 
     private static void ShowInfo(WsServer server)

@@ -19,6 +19,9 @@ class WsServer
     public int Port { get; }
     public string PairingToken { get; } = LoadOrCreateToken();
 
+    /// <summary>スマホの認証成功時に発火。QRウィンドウの自動クローズなどに使う。</summary>
+    public event Action? ClientAuthenticated;
+
     /// <summary>トークンを%APPDATA%\PocketPadに永続化。再起動しても同じトークンで再接続できる。</summary>
     private static string LoadOrCreateToken()
     {
@@ -143,6 +146,7 @@ class WsServer
             if (root.TryGetProperty("token", out var t) && t.GetString() == PairingToken)
             {
                 await SendJsonAsync(ws, new { type = "auth_ok", device_secret = RandomNumberGenerator.GetHexString(64, lowercase: true) });
+                ClientAuthenticated?.Invoke();
                 return true;
             }
             await SendJsonAsync(ws, new { type = "auth_ng", reason = "invalid_token" });

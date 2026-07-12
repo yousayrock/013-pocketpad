@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -48,6 +49,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
   final _host = TextEditingController();
   final _token = TextEditingController();
   bool _busy = false;
+  bool _showManual = false;
+  String _status = '';
 
   @override
   void initState() {
@@ -55,20 +58,39 @@ class _ConnectScreenState extends State<ConnectScreen> {
     SharedPreferences.getInstance().then((p) {
       _host.text = p.getString('host') ?? '';
       _token.text = p.getString('token') ?? '';
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
+      if (_host.text.isNotEmpty && _token.text.isNotEmpty) {
+        _autoConnect(); // 前回のPCへ自動再接続
+      } else {
+        // 初回はQRスキャンがデフォルト動線
+        WidgetsBinding.instance.addPostFrameCallback((_) => _scanQr());
+      }
     });
   }
 
-  Future<void> _connect() async {
-    final host = _host.text.trim();
-    final token = _token.text.trim();
-    if (host.isEmpty || token.isEmpty) return;
+  Future<void> _autoConnect() async {
+    setState(() {
+      _busy = true;
+      _status = '前回のPC（${_host.text}）に再接続中…';
+    });
+    final ok =
+        await _tryConnect(_host.text, _token.text, const Duration(seconds: 3));
+    if (!ok && mounted) {
+      setState(() {
+        _busy = false;
+        _status = '自動接続できませんでした。QRを読み取ってください';
+      });
+      _scanQr(); // 失敗したらそのままカメラを開く（開けばカメラの動線）
+    }
+  }
 
-    setState(() => _busy = true);
+  /// 1ホストへの接続試行。成功したらTrackpadScreenへ遷移してtrueを返す。
+  Future<bool> _tryConnect(String host, String token, Duration timeout) async {
     try {
       final channel =
           WebSocketChannel.connect(Uri.parse('ws://$host:9013/ws'));
-      await channel.ready.timeout(const Duration(seconds: 5));
+      await channel.ready.timeout(timeout);
 
       final stream = channel.stream.asBroadcastStream();
       channel.sink.add(jsonEncode({
@@ -78,33 +100,71 @@ class _ConnectScreenState extends State<ConnectScreen> {
         'device_name': 'A25',
       }));
 
-      final reply = await stream
-          .firstWhere((m) => m is String)
-          .timeout(const Duration(seconds: 5));
+      final reply =
+          await stream.firstWhere((m) => m is String).timeout(timeout);
       final json = jsonDecode(reply as String) as Map<String, dynamic>;
 
-      if (json['type'] == 'auth_ok') {
-        final p = await SharedPreferences.getInstance();
-        await p.setString('host', host);
-        await p.setString('token', token);
-        if (!mounted) return;
-        Navigator.of(context).pushReplacement(MaterialPageRoute(
-          builder: (_) => TrackpadScreen(channel: channel, stream: stream),
-        ));
-        return;
+      if (json['type'] != 'auth_ok') {
+        channel.sink.close();
+        return false;
       }
-      channel.sink.close();
-      _fail('認証エラー: ${json['reason'] ?? '不明'}');
-    } on TimeoutException {
-      _fail('接続タイムアウト。PC側アプリの起動とIPを確認してください');
-    } catch (e) {
-      _fail('接続失敗: $e');
+      final p = await SharedPreferences.getInstance();
+      await p.setString('host', host);
+      await p.setString('token', token);
+      if (!mounted) return true;
+      Navigator.of(context).pushReplacement(MaterialPageRoute(
+        builder: (_) => TrackpadScreen(channel: channel, stream: stream),
+      ));
+      return true;
+    } catch (_) {
+      return false;
     }
+  }
+
+  Future<void> _connect() async {
+    final host = _host.text.trim();
+    final token = _token.text.trim();
+    if (host.isEmpty || token.isEmpty) return;
+
+    setState(() => _busy = true);
+    final ok = await _tryConnect(host, token, const Duration(seconds: 5));
+    if (!ok) _fail('接続失敗。PC側アプリの起動・IP・トークンを確認してください');
+  }
+
+  /// PC画面のQRを読み、記載された全ホスト候補へ順に接続を試みる。
+  Future<void> _scanQr() async {
+    final raw = await Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const ScanScreen()),
+    );
+    if (raw == null || !mounted) return;
+
+    List<String> hosts;
+    String token;
+    try {
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      if (j['app'] != 'pocketpad') throw const FormatException();
+      hosts = List<String>.from(j['hosts'] as List);
+      token = j['token'] as String;
+    } catch (_) {
+      _fail('PocketPadのQRではないようです');
+      return;
+    }
+
+    setState(() => _busy = true);
+    for (final host in hosts) {
+      _host.text = host;
+      _token.text = token;
+      if (await _tryConnect(host, token, const Duration(seconds: 3))) return;
+    }
+    _fail('QRのどのIPにも接続できませんでした。PCと同じWiFiにいるか確認してください');
   }
 
   void _fail(String msg) {
     if (!mounted) return;
-    setState(() => _busy = false);
+    setState(() {
+      _busy = false;
+      _status = msg;
+    });
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(msg), backgroundColor: kMagenta));
   }
@@ -112,51 +172,198 @@ class _ConnectScreenState extends State<ConnectScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('PocketPad',
-                  style: TextStyle(
-                      fontSize: 36,
-                      fontWeight: FontWeight.bold,
-                      color: kAccent,
-                      letterSpacing: 4)),
-              const SizedBox(height: 4),
-              const Text('Your PC. In Your Pocket. — 013号',
-                  style: TextStyle(color: Colors.white54)),
-              const SizedBox(height: 40),
-              TextField(
-                controller: _host,
-                decoration: const InputDecoration(
-                  labelText: 'PCのIPアドレス（例: 192.168.1.10）',
-                  border: OutlineInputBorder(),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 96,
+                  height: 96,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border:
+                        Border.all(color: kAccent.withValues(alpha: 0.6), width: 2),
+                    boxShadow: [
+                      BoxShadow(
+                          color: kAccent.withValues(alpha: 0.25), blurRadius: 24),
+                    ],
+                  ),
+                  child: const Icon(Icons.touch_app, size: 44, color: kAccent),
                 ),
-                keyboardType: TextInputType.url,
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _token,
-                decoration: const InputDecoration(
-                  labelText: 'ペアリングトークン（PC側トレイ→接続情報）',
-                  border: OutlineInputBorder(),
+                const SizedBox(height: 24),
+                const Text('PocketPad',
+                    style: TextStyle(
+                        fontSize: 40,
+                        fontWeight: FontWeight.bold,
+                        color: kAccent,
+                        letterSpacing: 6)),
+                const SizedBox(height: 4),
+                const Text('Your PC. In Your Pocket. — 未来ガジェット013号',
+                    style: TextStyle(color: Colors.white54, fontSize: 12)),
+                const SizedBox(height: 32),
+                if (_status.isNotEmpty) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      if (_busy)
+                        const Padding(
+                          padding: EdgeInsets.only(right: 10),
+                          child: SizedBox(
+                              width: 14,
+                              height: 14,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2)),
+                        ),
+                      Flexible(
+                        child: Text(_status,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(color: Colors.white70)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                ],
+                SizedBox(
+                  width: double.infinity,
+                  height: 64,
+                  child: FilledButton.icon(
+                    onPressed: _busy ? null : _scanQr,
+                    icon: const Icon(Icons.qr_code_scanner, size: 28),
+                    label: const Text('QRコードで接続',
+                        style: TextStyle(
+                            fontSize: 18, fontWeight: FontWeight.bold)),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: FilledButton(
-                  onPressed: _busy ? null : _connect,
-                  child: Text(_busy ? '接続中…' : '接続',
-                      style: const TextStyle(fontSize: 18)),
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: _busy
+                      ? null
+                      : () => setState(() => _showManual = !_showManual),
+                  child: Text(_showManual ? '手動入力を閉じる' : '手動で入力する',
+                      style: const TextStyle(color: Colors.white54)),
                 ),
-              ),
-            ],
+                if (_showManual) ...[
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _host,
+                    decoration: const InputDecoration(
+                      labelText: 'PCのIPアドレス（例: 192.168.1.10）',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.url,
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: _token,
+                    decoration: const InputDecoration(
+                      labelText: 'ペアリングトークン',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: OutlinedButton(
+                      onPressed: _busy ? null : _connect,
+                      child: Text(_busy ? '接続中…' : 'この情報で接続',
+                          style: const TextStyle(fontSize: 16)),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 40),
+                const Text(
+                    'PC側はタスクトレイのPocketPadアイコンを\nクリックするとQRが表示されます',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white38, fontSize: 12)),
+              ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────── QRスキャン画面
+
+class ScanScreen extends StatefulWidget {
+  const ScanScreen({super.key});
+
+  @override
+  State<ScanScreen> createState() => _ScanScreenState();
+}
+
+class _ScanScreenState extends State<ScanScreen> {
+  final _controller = MobileScannerController();
+  bool _handled = false;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: kBg,
+        title: const Text('PC画面のQRを読み取る'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.flashlight_on),
+            tooltip: 'ライト',
+            onPressed: () => _controller.toggleTorch(),
+          ),
+        ],
+      ),
+      body: Stack(
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: (capture) {
+              if (_handled || capture.barcodes.isEmpty) return;
+              final raw = capture.barcodes.first.rawValue;
+              if (raw == null) return;
+              _handled = true;
+              Navigator.of(context).pop(raw);
+            },
+          ),
+          // スキャン枠
+          Center(
+            child: Container(
+              width: 260,
+              height: 260,
+              decoration: BoxDecoration(
+                border: Border.all(color: kAccent, width: 3),
+                borderRadius: BorderRadius.circular(24),
+              ),
+            ),
+          ),
+          // 案内カード
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Container(
+              margin: const EdgeInsets.all(24),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+              decoration: BoxDecoration(
+                color: kBg.withValues(alpha: 0.85),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: kAccent.withValues(alpha: 0.3)),
+              ),
+              child: const Text(
+                'PCのタスクトレイアイコンをクリックして\n表示されたQRコードを枠に合わせてください',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
