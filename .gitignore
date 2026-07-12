@@ -1,0 +1,22 @@
+# .NET
+pc/**/bin/
+pc/**/obj/
+*.user
+
+# Flutter / Dart
+app/.dart_tool/
+app/build/
+app/.flutter-plugins*
+app/.packages
+app/android/.gradle/
+app/android/local.properties
+app/*.iml
+
+# IDE
+.vs/
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+desktop.ini
