@@ -175,15 +175,80 @@ class WsServer
                 break;
 
             case "shortcut":
-                var keys = ReadStringArray(root, "keys");
-                if (keys.Length > 0)
+                RunShortcut(ReadStringArray(root, "keys"));
+                break;
+
+            case "launch":
+                LaunchApp(root.GetProperty("target").GetString() ?? "");
+                break;
+
+            case "screenshot":
+                // 全画面をキャプチャしてスマホへ返す（スマホ側で表示・保存できる）
+                try
                 {
-                    var vk = VkFromName(keys[^1]);
-                    if (vk != 0) InputInjector.Shortcut(vk, keys[..^1]);
+                    var jpeg = ScreenCapture.CaptureJpegBase64();
+                    await SendJsonAsync(ws, new { type = "screenshot_result", jpeg });
+                }
+                catch (Exception)
+                {
+                    await SendJsonAsync(ws, new { type = "screenshot_error" });
+                }
+                break;
+
+            case "macro":
+                // steps: [{type:"shortcut",keys:[...]}, {type:"text",text:"..."}, {type:"delay",ms:200}, ...]
+                if (root.TryGetProperty("steps", out var steps) && steps.ValueKind == JsonValueKind.Array)
+                {
+                    await RunMacroAsync(steps);
                 }
                 break;
         }
         return authed;
+    }
+
+    private static void RunShortcut(string[] keys)
+    {
+        if (keys.Length == 0) return;
+        var vk = VkFromName(keys[^1]);
+        if (vk != 0) InputInjector.Shortcut(vk, keys[..^1]);
+    }
+
+    /// <summary>アプリ/URL/ファイルを起動。ShellExecuteで.exe・URL・フォルダ何でも開ける。</summary>
+    private static void LaunchApp(string target)
+    {
+        if (string.IsNullOrWhiteSpace(target)) return;
+        try
+        {
+            System.Diagnostics.Process.Start(
+                new System.Diagnostics.ProcessStartInfo(target) { UseShellExecute = true });
+        }
+        catch (Exception)
+        {
+            // 存在しないパス等は握りつぶす（PCを落とさない）
+        }
+    }
+
+    private static async Task RunMacroAsync(JsonElement steps)
+    {
+        foreach (var step in steps.EnumerateArray())
+        {
+            var t = step.GetProperty("type").GetString();
+            switch (t)
+            {
+                case "shortcut":
+                    RunShortcut(ReadStringArray(step, "keys"));
+                    break;
+                case "text":
+                    InputInjector.Text(step.GetProperty("text").GetString() ?? "");
+                    break;
+                case "launch":
+                    LaunchApp(step.GetProperty("target").GetString() ?? "");
+                    break;
+                case "delay":
+                    await Task.Delay(step.TryGetProperty("ms", out var ms) ? ms.GetInt32() : 100);
+                    break;
+            }
+        }
     }
 
     private static string[] ReadStringArray(JsonElement root, string name) =>
@@ -204,6 +269,7 @@ class WsServer
         "space" => 0x20,
         "backspace" => 0x08,
         "delete" => 0x2E,
+        "prtsc" => 0x2C, // PrintScreen（全画面キャプチャ）
         "up" => 0x26,
         "down" => 0x28,
         "left" => 0x25,
