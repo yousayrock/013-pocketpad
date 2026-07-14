@@ -392,11 +392,16 @@ class TrackpadScreen extends StatefulWidget {
 class _TrackpadScreenState extends State<TrackpadScreen> {
   static const _sensitivity = 1.4;
 
+  // 入力欄の先頭に置く番兵（ゼロ幅スペース）。これが消えた＝空欄で
+  // バックスペースが押されたと分かるので、PCへbackspaceを転送する。
+  static final _zwsp = String.fromCharCode(0x200B);
+
   double _dx = 0, _dy = 0, _scroll = 0;
   Timer? _flush;
   Timer? _ping;
+  Timer? _bsRepeat;
   StreamSubscription? _sub;
-  final _text = TextEditingController();
+  final _text = TextEditingController(text: _zwsp);
   bool _showKeyboard = false;
   final _textFocus = FocusNode();
   int _tab = 0; // 0=トラックパッド, 1=ランチャー
@@ -474,6 +479,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   void dispose() {
     _flush?.cancel();
     _ping?.cancel();
+    _bsRepeat?.cancel();
     _sub?.cancel();
     widget.channel.sink.close();
     _text.dispose();
@@ -530,13 +536,23 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
                 autofocus: true,
                 textInputAction: TextInputAction.send,
                 decoration: InputDecoration(
-                  hintText: '文章を完成させてEnterでPCへ（PC側Enterも押される）',
+                  labelText: 'Enterで送信。空欄でのバックスペースはPCに効く',
                   border: const OutlineInputBorder(),
                   suffixIcon: IconButton(
                     icon: const Icon(Icons.send, color: kAccent),
                     onPressed: _sendText,
                   ),
                 ),
+                onChanged: (v) {
+                  // 番兵が消えた＝空欄でバックスペース → PCのカーソル位置の文字を消す
+                  if (!v.contains(_zwsp)) {
+                    _shortcut(['backspace']);
+                    _text.value = TextEditingValue(
+                      text: _zwsp + v,
+                      selection: const TextSelection.collapsed(offset: 1),
+                    );
+                  }
+                },
                 onSubmitted: (_) {
                   _sendText();
                   _sendJson({'type': 'key', 'vk': 0x0D, 'action': 'tap', 'modifiers': <String>[]});
@@ -544,34 +560,59 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
                 },
               ),
             ),
-          // ページ切替スワイプはインジケーターの帯だけで受ける。
-          // バー全体で受けるとタップ時のわずかな横ぶれをスワイプ判定が
-          // 奪ってしまい、下のボタンが「効いたり効かなかったり」する。
+          // ページ切替バー（帯全体・高さ44で受ける。操作ボタン行とは別の行なので
+          // タップ判定の競合は起きない）。左半分タップ=前ページ、右半分=次ページ、
+          // 横スワイプでも切替できる。
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onHorizontalDragEnd: (d) {
               final v = d.primaryVelocity ?? 0;
-              if (v < -80 && _tab < 2) setState(() => _tab++);
-              if (v > 80 && _tab > 0) setState(() => _tab--);
+              if (v < -50 && _tab < 2) setState(() => _tab++);
+              if (v > 50 && _tab > 0) setState(() => _tab--);
             },
-            // ページインジケーター（スワイプで移動できることを示す）
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
+            child: SizedBox(
+              height: 44,
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(
-                  3,
-                  (i) => AnimatedContainer(
-                    duration: const Duration(milliseconds: 150),
-                    width: _tab == i ? 18 : 8,
-                    height: 8,
-                    margin: const EdgeInsets.symmetric(horizontal: 3),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(4),
-                      color: _tab == i ? kAccent : Colors.white24,
+                children: [
+                  Expanded(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        if (_tab > 0) setState(() => _tab--);
+                      },
+                      child: Icon(Icons.chevron_left,
+                          size: 28,
+                          color: _tab > 0 ? kAccent : Colors.white12),
                     ),
                   ),
-                ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: List.generate(
+                      3,
+                      (i) => AnimatedContainer(
+                        duration: const Duration(milliseconds: 150),
+                        width: _tab == i ? 22 : 10,
+                        height: 10,
+                        margin: const EdgeInsets.symmetric(horizontal: 4),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(5),
+                          color: _tab == i ? kAccent : Colors.white24,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        if (_tab < 2) setState(() => _tab++);
+                      },
+                      child: Icon(Icons.chevron_right,
+                          size: 28,
+                          color: _tab < 2 ? kAccent : Colors.white12),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -580,6 +621,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
             child: Row(
               children: [
                 _iconBtn(Icons.keyboard_return, () => _shortcut(['enter'])),
+                _backspaceBtn(),
                 _iconBtn(
                     _showKeyboard ? Icons.keyboard_hide : Icons.keyboard,
                     () => setState(() => _showKeyboard = !_showKeyboard)),
@@ -591,6 +633,36 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
           const SizedBox(height: 8),
         ],
       ),
+      ),
+    );
+  }
+
+  /// バックスペースボタン。タップで1文字、長押しで連続削除。
+  Widget _backspaceBtn() {
+    return Expanded(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        child: Listener(
+          onPointerUp: (_) => _bsRepeat?.cancel(),
+          onPointerCancel: (_) => _bsRepeat?.cancel(),
+          child: OutlinedButton(
+            onPressed: () => _shortcut(['backspace']),
+            onLongPress: () {
+              _shortcut(['backspace']);
+              _bsRepeat?.cancel();
+              _bsRepeat = Timer.periodic(const Duration(milliseconds: 90),
+                  (_) => _shortcut(['backspace']));
+            },
+            style: OutlinedButton.styleFrom(
+              foregroundColor: kAccent,
+              side: BorderSide(color: kAccent.withValues(alpha: 0.4)),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12)),
+            ),
+            child: const Icon(Icons.backspace_outlined, size: 22),
+          ),
+        ),
       ),
     );
   }
@@ -616,9 +688,14 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   }
 
   void _sendText() {
-    if (_text.text.isEmpty) return;
-    _sendJson({'type': 'text', 'text': _text.text});
-    _text.clear();
+    final t = _text.text.replaceAll(_zwsp, '');
+    if (t.isEmpty) return;
+    _sendJson({'type': 'text', 'text': t});
+    // 空にせず番兵だけ残す（空欄バックスペース検出用）
+    _text.value = TextEditingValue(
+      text: _zwsp,
+      selection: const TextSelection.collapsed(offset: 1),
+    );
   }
 }
 
