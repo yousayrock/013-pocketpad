@@ -69,7 +69,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
         _autoConnect(); // 前回のPCへ自動再接続
       } else {
         // 初回はQRスキャンがデフォルト動線
-        WidgetsBinding.instance.addPostFrameCallback((_) => _scanQr());
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _scanQr();
+        });
       }
     });
   }
@@ -460,6 +462,11 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   void _sendJson(Map<String, dynamic> obj) =>
       widget.channel.sink.add(jsonEncode(obj));
 
+  void _move(double dx, double dy) {
+    _dx += dx * _sensitivity;
+    _dy += dy * _sensitivity;
+  }
+
   void _shortcut(List<String> keys) =>
       _sendJson({'type': 'shortcut', 'keys': keys});
 
@@ -485,55 +492,36 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
             child: _tab == 2
                 ? YoutubePanel(
                     onSend: _sendJson,
-                    onMove: (dx, dy) {
-                      _dx += dx * _sensitivity;
-                      _dy += dy * _sensitivity;
-                    },
+                    onMove: _move,
                     onScroll: (dy) => _scroll += dy,
                   )
                 : _tab == 1
-                ? LauncherPanel(buttons: defaultDeck, onSend: _sendJson)
-                : Row(
-              children: [
-                Expanded(
-                  child: Trackpad(
-                    onMove: (dx, dy) {
-                      _dx += dx * _sensitivity;
-                      _dy += dy * _sensitivity;
-                    },
-                    onClick: (button, action) => _sendJson(
-                        {'type': 'click', 'button': button, 'action': action}),
-                    borderColor: kAccent,
-                    child: const Center(
-                      child: Text(
-                        'トラックパッド\nタップ=左クリック / 長押し=右クリック\nタップ後すぐなぞる=掴んで移動',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.white24),
+                    ? LauncherPanel(
+                        buttons: defaultDeck,
+                        onSend: _sendJson,
+                        onMove: _move,
+                        onScroll: (dy) => _scroll += dy,
+                      )
+                    : TrackpadArea(
+                        onMove: _move,
+                        onScroll: (dy) => _scroll += dy,
+                        onClick: (button, action) => _sendJson({
+                          'type': 'click',
+                          'button': button,
+                          'action': action
+                        }),
+                        bottomMargin: 8,
+                        child: const Center(
+                          child: Text(
+                            'トラックパッド\nタップ=左クリック / 長押し=右クリック\nタップ後すぐなぞる=掴んで移動',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.white24),
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                ),
-                // スクロールストリップ
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onVerticalDragUpdate: (d) => _scroll += -d.delta.dy * 4,
-                  child: Container(
-                    width: 60,
-                    margin: const EdgeInsets.only(top: 8, bottom: 8, right: 8),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: kMagenta.withValues(alpha: 0.3)),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Center(
-                      child: Icon(Icons.unfold_more, color: Colors.white24),
-                    ),
-                  ),
-                ),
-              ],
-            ),
           ),
-          // テキスト入力（トラックパッド画面 かつ キーボードトグル時）
-          if (_tab == 0 && _showKeyboard)
+          // テキスト入力（どの画面でもキーボードトグルで表示）
+          if (_showKeyboard)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8),
               child: TextField(
@@ -556,7 +544,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
                 },
               ),
             ),
-          // 操作バー：左右スワイプでページ切替（トラックパッド ⇄ マクロ）
+          // ページ切替スワイプはインジケーターの帯だけで受ける。
+          // バー全体で受けるとタップ時のわずかな横ぶれをスワイプ判定が
+          // 奪ってしまい、下のボタンが「効いたり効かなかったり」する。
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onHorizontalDragEnd: (d) {
@@ -564,44 +554,41 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
               if (v < -80 && _tab < 2) setState(() => _tab++);
               if (v > 80 && _tab > 0) setState(() => _tab--);
             },
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // ページインジケーター（スワイプで移動できることを示す）
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(
-                    3,
-                    (i) => AnimatedContainer(
-                      duration: const Duration(milliseconds: 150),
-                      width: _tab == i ? 18 : 8,
-                      height: 8,
-                      margin: const EdgeInsets.symmetric(horizontal: 3),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(4),
-                        color: _tab == i ? kAccent : Colors.white24,
-                      ),
+            // ページインジケーター（スワイプで移動できることを示す）
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: List.generate(
+                  3,
+                  (i) => AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    width: _tab == i ? 18 : 8,
+                    height: 8,
+                    margin: const EdgeInsets.symmetric(horizontal: 3),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(4),
+                      color: _tab == i ? kAccent : Colors.white24,
                     ),
                   ),
                 ),
-                const SizedBox(height: 4),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Row(
-                    children: [
-                      _iconBtn(Icons.keyboard_return, () => _shortcut(['enter'])),
-                      _iconBtn(
-                          _showKeyboard ? Icons.keyboard_hide : Icons.keyboard,
-                          () => setState(() => _showKeyboard = !_showKeyboard)),
-                      _iconBtn(Icons.swap_horiz, () => _shortcut(['alt', 'tab'])),
-                      _iconBtn(Icons.window, () => _shortcut(['win'])),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 8),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(
+              children: [
+                _iconBtn(Icons.keyboard_return, () => _shortcut(['enter'])),
+                _iconBtn(
+                    _showKeyboard ? Icons.keyboard_hide : Icons.keyboard,
+                    () => setState(() => _showKeyboard = !_showKeyboard)),
+                _iconBtn(Icons.swap_horiz, () => _shortcut(['alt', 'tab'])),
+                _iconBtn(Icons.window, () => _shortcut(['win'])),
               ],
             ),
           ),
+          const SizedBox(height: 8),
         ],
       ),
       ),

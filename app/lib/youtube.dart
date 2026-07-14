@@ -6,7 +6,6 @@ import 'trackpad.dart';
 
 const _kBg = Color(0xFF050810);
 const _kAccent = Color(0xFF00F5FF);
-const _kMagenta = Color(0xFFFF006E);
 const _kRed = Color(0xFFFF0033);
 
 /// YouTube操作パネル。Brave等のブラウザでYouTubeを見ているとき、
@@ -35,36 +34,13 @@ class YoutubePanel extends StatelessWidget {
       children: [
         // 上半分：トラックパッド + スクロール帯（メイン画面と同じ操作系）
         Expanded(
-          child: Row(
-            children: [
-              Expanded(
-                child: Trackpad(
-                  onMove: onMove,
-                  onClick: _click,
-                  borderColor: _kAccent,
-                  margin: const EdgeInsets.fromLTRB(8, 8, 0, 0),
-                  child: const Center(
-                    child: Icon(Icons.touch_app, color: Colors.white12, size: 32),
-                  ),
-                ),
-              ),
-              // スクロールストリップ
-              GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onVerticalDragUpdate: (d) => onScroll(-d.delta.dy * 4),
-                child: Container(
-                  width: 60,
-                  margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: _kMagenta.withValues(alpha: 0.3)),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Center(
-                    child: Icon(Icons.unfold_more, color: Colors.white24),
-                  ),
-                ),
-              ),
-            ],
+          child: TrackpadArea(
+            onMove: onMove,
+            onScroll: onScroll,
+            onClick: _click,
+            child: const Center(
+              child: Icon(Icons.touch_app, color: Colors.white12, size: 32),
+            ),
           ),
         ),
         // 下半分：再生コントロール

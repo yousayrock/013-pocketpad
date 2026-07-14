@@ -1,5 +1,59 @@
 import 'package:flutter/material.dart';
 
+const _kAccent = Color(0xFF00F5FF);
+const _kMagenta = Color(0xFFFF006E);
+
+/// トラックパッド + 右端スクロール帯のセット。各画面の上半分で共用する。
+class TrackpadArea extends StatelessWidget {
+  const TrackpadArea({
+    super.key,
+    required this.onMove,
+    required this.onScroll,
+    required this.onClick,
+    this.bottomMargin = 0,
+    this.child,
+  });
+
+  final void Function(double dx, double dy) onMove;
+  final void Function(double dy) onScroll;
+  final void Function(String button, String action) onClick;
+  final double bottomMargin;
+  final Widget? child;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Trackpad(
+            onMove: onMove,
+            onClick: onClick,
+            borderColor: _kAccent,
+            margin: EdgeInsets.fromLTRB(8, 8, 0, bottomMargin),
+            child: child,
+          ),
+        ),
+        // スクロールストリップ
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onVerticalDragUpdate: (d) => onScroll(-d.delta.dy * 4),
+          child: Container(
+            width: 60,
+            margin: EdgeInsets.fromLTRB(8, 8, 8, bottomMargin),
+            decoration: BoxDecoration(
+              border: Border.all(color: _kMagenta.withValues(alpha: 0.3)),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Center(
+              child: Icon(Icons.unfold_more, color: Colors.white24),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// トラックパッド面（メイン画面とYouTube画面で共用）。
 /// なぞる=カーソル移動 / タップ=左クリック / ダブルタップ=ダブルクリック /
 /// 長押し=右クリック / タップ直後になぞる=掴んで移動（ドラッグ）。

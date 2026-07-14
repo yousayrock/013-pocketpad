@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'trackpad.dart';
+
 const _kAccent = Color(0xFF00F5FF);
 const _kMagenta = Color(0xFFFF006E);
 
@@ -96,32 +98,66 @@ const List<DeckButton> defaultDeck = [
   ),
 ];
 
-/// ランチャーパネル本体。ボタンをグリッド表示し、タップでonSendにメッセージを渡す。
+/// ランチャーパネル本体。上半分はトラックパッド、下は3列×2段のマクロボタン。
+/// ボタンは縦スクロールで次の6個がぬるっと出てくる。
 class LauncherPanel extends StatelessWidget {
   const LauncherPanel({
     super.key,
     required this.buttons,
     required this.onSend,
+    required this.onMove,
+    required this.onScroll,
   });
 
   final List<DeckButton> buttons;
   final void Function(Map<String, dynamic> message) onSend;
+  final void Function(double dx, double dy) onMove;
+  final void Function(double dy) onScroll;
 
   @override
   Widget build(BuildContext context) {
-    return GridView.builder(
-      padding: const EdgeInsets.all(12),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        mainAxisSpacing: 12,
-        crossAxisSpacing: 12,
-        childAspectRatio: 1,
-      ),
-      itemCount: buttons.length,
-      itemBuilder: (context, i) {
-        final b = buttons[i];
-        return _DeckTile(button: b, onTap: () => onSend(b.message));
-      },
+    return Column(
+      children: [
+        // 上半分：トラックパッド + スクロール帯
+        Expanded(
+          child: TrackpadArea(
+            onMove: onMove,
+            onScroll: onScroll,
+            onClick: (button, action) => onSend(
+                {'type': 'click', 'button': button, 'action': action}),
+            child: const Center(
+              child: Icon(Icons.touch_app, color: Colors.white12, size: 32),
+            ),
+          ),
+        ),
+        // 下：マクロボタン。6個（3列×2段）だけ見せて、スクロールで続きが現れる
+        LayoutBuilder(builder: (context, constraints) {
+          const cols = 3;
+          const spacing = 12.0;
+          const pad = 12.0;
+          final tile =
+              (constraints.maxWidth - pad * 2 - spacing * (cols - 1)) / cols;
+          final height = tile * 2 + spacing + pad * 2;
+          return SizedBox(
+            height: height,
+            child: GridView.builder(
+              padding: const EdgeInsets.all(pad),
+              physics: const BouncingScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: cols,
+                mainAxisSpacing: spacing,
+                crossAxisSpacing: spacing,
+                childAspectRatio: 1,
+              ),
+              itemCount: buttons.length,
+              itemBuilder: (context, i) {
+                final b = buttons[i];
+                return _DeckTile(button: b, onTap: () => onSend(b.message));
+              },
+            ),
+          );
+        }),
+      ],
     );
   }
 }
