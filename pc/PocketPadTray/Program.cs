@@ -31,6 +31,13 @@ class TrayContext : ApplicationContext
         menu.Items.Add("接続QRを表示", null, (_, _) => ShowQr(server));
         menu.Items.Add("接続情報を表示（テキスト）", null, (_, _) => ShowInfo(server));
         menu.Items.Add(new ToolStripSeparator());
+        var startupItem = new ToolStripMenuItem("Windows起動時に自動起動")
+        {
+            Checked = Startup.IsEnabled(),
+        };
+        startupItem.Click += (_, _) => startupItem.Checked = Startup.Toggle();
+        menu.Items.Add(startupItem);
+        menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("終了", null, (_, _) => ExitThread());
 
         _icon = new NotifyIcon
