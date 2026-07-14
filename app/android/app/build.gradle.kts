@@ -34,7 +34,9 @@ android {
     }
 
     // flutter-gradle-pluginのforceNdkDownload（ダミーCMakeを設定しNDK約700MBを強制DLさせる）を打ち消す。
-    // ネイティブコード不使用のためNDK不要。libflutter.soのstripが警告になるだけで実害なし（IPv6オンリー回線のギガ節約）
+    // ネイティブコード不使用のためNDK不要（IPv6オンリー回線のギガ節約）。
+    // 注意：NDKが無いとlibflutter.so（未strip・約160MB/ABI）がそのまま入りAPKが約500MBになる。
+    // flutter upgradeでエンジンが再DLされたら app/tool/strip_engine.ps1 を一度実行してからビルドすること。
     externalNativeBuild {
         cmake {
             path = null
