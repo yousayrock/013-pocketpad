@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'launcher.dart';
+import 'trackpad.dart';
 import 'youtube.dart';
 
 // 011号RoadTalkと同じサイバーパンク配色
@@ -459,9 +460,6 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   void _sendJson(Map<String, dynamic> obj) =>
       widget.channel.sink.add(jsonEncode(obj));
 
-  void _click(String button) =>
-      _sendJson({'type': 'click', 'button': button, 'action': 'tap'});
-
   void _shortcut(List<String> keys) =>
       _sendJson({'type': 'shortcut', 'keys': keys});
 
@@ -485,34 +483,32 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
           // ページ本体（トラックパッド / マクロ / YouTube。操作バーのスワイプで移動）
           Expanded(
             child: _tab == 2
-                ? YoutubePanel(onSend: _sendJson)
+                ? YoutubePanel(
+                    onSend: _sendJson,
+                    onMove: (dx, dy) {
+                      _dx += dx * _sensitivity;
+                      _dy += dy * _sensitivity;
+                    },
+                    onScroll: (dy) => _scroll += dy,
+                  )
                 : _tab == 1
                 ? LauncherPanel(buttons: defaultDeck, onSend: _sendJson)
                 : Row(
               children: [
                 Expanded(
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onPanUpdate: (d) {
-                      _dx += d.delta.dx * _sensitivity;
-                      _dy += d.delta.dy * _sensitivity;
+                  child: Trackpad(
+                    onMove: (dx, dy) {
+                      _dx += dx * _sensitivity;
+                      _dy += dy * _sensitivity;
                     },
-                    onTap: () => _click('left'),
-                    onDoubleTap: () =>
-                        _sendJson({'type': 'click', 'button': 'left', 'action': 'double'}),
-                    onLongPress: () => _click('right'),
-                    child: Container(
-                      margin: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: kAccent.withValues(alpha: 0.3)),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Center(
-                        child: Text(
-                          'トラックパッド\nタップ=左クリック / 長押し=右クリック',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white24),
-                        ),
+                    onClick: (button, action) => _sendJson(
+                        {'type': 'click', 'button': button, 'action': action}),
+                    borderColor: kAccent,
+                    child: const Center(
+                      child: Text(
+                        'トラックパッド\nタップ=左クリック / 長押し=右クリック\nタップ後すぐなぞる=掴んで移動',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white24),
                       ),
                     ),
                   ),
@@ -608,26 +604,6 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
           ),
         ],
       ),
-      ),
-    );
-  }
-
-  Widget _btn(String label, VoidCallback onTap, {int flex = 1}) {
-    return Expanded(
-      flex: flex,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2),
-        child: OutlinedButton(
-          onPressed: onTap,
-          style: OutlinedButton.styleFrom(
-            foregroundColor: kAccent,
-            side: BorderSide(color: kAccent.withValues(alpha: 0.4)),
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12)),
-          ),
-          child: Text(label),
-        ),
       ),
     );
   }
