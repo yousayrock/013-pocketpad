@@ -17,4 +17,9 @@
     <PackageReference Include="QRCoder" Version="1.8.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 設定ダッシュボード（http://localhost:9013/）。exeに埋め込んで単一ファイル配布を保つ -->
+    <EmbeddedResource Include="dashboard.html" />
+  </ItemGroup>
+
 </Project>

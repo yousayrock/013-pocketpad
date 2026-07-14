@@ -30,6 +30,9 @@ class TrayContext : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("接続QRを表示", null, (_, _) => ShowQr(server));
         menu.Items.Add("接続情報を表示（テキスト）", null, (_, _) => ShowInfo(server));
+        menu.Items.Add("設定ダッシュボードを開く", null, (_, _) =>
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                $"http://localhost:{server.Port}/") { UseShellExecute = true }));
         menu.Items.Add(new ToolStripSeparator());
         var startupItem = new ToolStripMenuItem("Windows起動時に自動起動")
         {

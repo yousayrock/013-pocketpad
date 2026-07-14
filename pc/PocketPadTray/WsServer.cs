@@ -41,6 +41,14 @@ class WsServer
 
     private WebApplication? _app;
 
+    /// <summary>認証済みのスマホ接続（1台想定）。ダッシュボードからの設定プッシュに使う。</summary>
+    private volatile WebSocket? _client;
+
+    /// <summary>同一ソケットへの並行SendAsync防止（受信ループ応答とダッシュボード起点のプッシュ）。</summary>
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+
+    public bool ClientConnected => _client is { State: WebSocketState.Open };
+
     public WsServer(int port) => Port = port;
 
     public void Start()
@@ -51,7 +59,102 @@ class WsServer
         _app = builder.Build();
         _app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(15) });
         _app.Map("/ws", HandleAsync);
+        MapDashboard(_app);
         _ = _app.RunAsync();
+    }
+
+    // ─────────────────────────── 設定ダッシュボード（HTTP、localhost限定）
+
+    private void MapDashboard(WebApplication app)
+    {
+        app.MapGet("/", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            ctx.Response.ContentType = "text/html; charset=utf-8";
+            await ctx.Response.WriteAsync(LoadDashboardHtml());
+        });
+
+        app.MapGet("/api/config", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            var json = SettingsStore.Load();
+            if (json is null) { ctx.Response.StatusCode = 404; return; }
+            ctx.Response.ContentType = "application/json; charset=utf-8";
+            await ctx.Response.WriteAsync(json);
+        });
+
+        app.MapPut("/api/config", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            using var ms = new MemoryStream();
+            await ctx.Request.Body.CopyToAsync(ms);
+            if (ms.Length > 512 * 1024) { ctx.Response.StatusCode = 413; return; }
+            try
+            {
+                using var doc = JsonDocument.Parse(ms.ToArray());
+                if (!SettingsStore.TryValidate(doc.RootElement, out var error))
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsync(error);
+                    return;
+                }
+                SettingsStore.Save(doc.RootElement);
+                var pushed = await PushConfigAsync(doc.RootElement.GetRawText());
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
+            }
+            catch (JsonException)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsync("invalid json");
+            }
+        });
+
+        app.MapGet("/api/status", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { connected = ClientConnected }));
+        });
+    }
+
+    /// <summary>ダッシュボード/APIはlocalhostからのみ。LAN内の他端末には見せない。</summary>
+    private static bool Reject(HttpContext ctx)
+    {
+        if (ctx.Connection.RemoteIpAddress is { } ip && System.Net.IPAddress.IsLoopback(ip))
+            return false;
+        ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return true;
+    }
+
+    /// <summary>ダッシュボードHTML。DEBUG時はソースのdashboard.htmlを毎回読む（編集→F5で反映）。</summary>
+    private static string LoadDashboardHtml()
+    {
+#if DEBUG
+        var src = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "dashboard.html");
+        if (File.Exists(src)) return File.ReadAllText(src);
+#endif
+        using var stream = System.Reflection.Assembly.GetExecutingAssembly()
+            .GetManifestResourceStream("PocketPadTray.dashboard.html");
+        if (stream is null) return "<h1>dashboard.html not embedded</h1>";
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>接続中のスマホへ設定をプッシュ。未接続・送信失敗は false。</summary>
+    public async Task<bool> PushConfigAsync(string settingsJson)
+    {
+        var ws = _client;
+        if (ws is not { State: WebSocketState.Open }) return false;
+        try
+        {
+            await SendTextAsync(ws, "{\"type\":\"config\",\"settings\":" + settingsJson + "}");
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     private async Task HandleAsync(HttpContext ctx)
@@ -95,6 +198,12 @@ class WsServer
         {
             // 切断は正常系として扱う（スマホのスリープ等）
         }
+        finally
+        {
+            // この接続が「現在の認証済みクライアント」なら参照を外す。
+            // 新しい接続に置き換わった後に旧接続が切れたケースでは消さない。
+            if (ReferenceEquals(_client, ws)) _client = null;
+        }
     }
 
     private static void HandleBinary(ReadOnlySpan<byte> s)
@@ -119,8 +228,8 @@ class WsServer
         var root = doc.RootElement;
         var type = root.GetProperty("type").GetString();
 
-        // デバッグ用受信ログ（ping以外）
-        if (type != "ping")
+        // デバッグ用受信ログ（pingと、設定全文を含んで巨大になるconfig_setは除く）
+        if (type is not ("ping" or "config_set"))
         {
             try
             {
@@ -146,6 +255,7 @@ class WsServer
             if (root.TryGetProperty("token", out var t) && t.GetString() == PairingToken)
             {
                 await SendJsonAsync(ws, new { type = "auth_ok", device_secret = RandomNumberGenerator.GetHexString(64, lowercase: true) });
+                _client = ws; // 設定プッシュ用に保持（1台想定、新しい接続が常に勝つ）
                 ClientAuthenticated?.Invoke();
                 return true;
             }
@@ -202,9 +312,62 @@ class WsServer
                     await RunMacroAsync(steps);
                 }
                 break;
+
+            case "config_get":
+                // 設定同期（スマホ主導）。PCに保存があれば配り、なければスマホの現在設定を要求する
+                var saved = SettingsStore.Load();
+                if (saved is not null)
+                {
+                    await SendTextAsync(ws, "{\"type\":\"config\",\"settings\":" + saved + "}");
+                }
+                else
+                {
+                    await SendJsonAsync(ws, new { type = "config_request" });
+                }
+                break;
+
+            case "config_set":
+                // スマホの設定をPCへ保存（初回シード／スマホ側での変更）。返信もプッシュもしない
+                if (root.TryGetProperty("settings", out var incoming)
+                    && SettingsStore.TryValidate(incoming, out _))
+                {
+                    SettingsStore.Save(incoming);
+                }
+                break;
+
+            case "power":
+                // スマホ側で確認ダイアログを挟んでから送られてくる
+                RunPowerAction(root.TryGetProperty("action", out var pa) ? pa.GetString() ?? "" : "");
+                break;
         }
         return authed;
     }
+
+    private static void RunPowerAction(string action)
+    {
+        try
+        {
+            switch (action)
+            {
+                case "sleep":
+                    SetSuspendState(false, false, false);
+                    break;
+                case "shutdown":
+                    System.Diagnostics.Process.Start("shutdown", "/s /t 0");
+                    break;
+                case "restart":
+                    System.Diagnostics.Process.Start("shutdown", "/r /t 0");
+                    break;
+            }
+        }
+        catch (Exception)
+        {
+            // 電源操作の失敗でサーバーを落とさない
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("powrprof.dll", SetLastError = true)]
+    private static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
 
     private static void RunShortcut(string[] keys)
     {
@@ -274,16 +437,51 @@ class WsServer
         "down" => 0x28,
         "left" => 0x25,
         "right" => 0x27,
+        "home" => 0x24,
+        "end" => 0x23,
+        "pageup" => 0x21,
+        "pagedown" => 0x22,
+        "insert" => 0x2D,
+        "apps" => 0x5D, // アプリケーションキー（右クリックメニュー）
+        // メディアキー（システム全体に効く。ブラウザ内jkl操作とは別物）
+        "volup" => 0xAF,
+        "voldown" => 0xAE,
+        "mute" => 0xAD,
+        "playpause" => 0xB3,
+        "nexttrack" => 0xB0,
+        "prevtrack" => 0xB1,
+        // 記号（US/JP配列共通で使える主要どころ。ctrl+plus/minus のズーム用）
+        "plus" => 0xBB,   // VK_OEM_PLUS
+        "minus" => 0xBD,  // VK_OEM_MINUS
+        "period" => 0xBE, // VK_OEM_PERIOD
+        "comma" => 0xBC,  // VK_OEM_COMMA
+        // 半角/全角（IME切替）。環境によりSendInputで効かない場合は 0xF3/0xF4 を試す
+        "kanji" => 0x19,
         var s when s.Length == 1 && s[0] is >= 'a' and <= 'z' => (ushort)(s[0] - 'a' + 0x41),
         var s when s.Length == 1 && s[0] is >= '0' and <= '9' => (ushort)(s[0] - '0' + 0x30),
         var s when s.StartsWith('f') && int.TryParse(s[1..], out var f) && f is >= 1 and <= 24 => (ushort)(0x70 + f - 1),
         _ => (ushort)0,
     };
 
-    private static Task SendJsonAsync(WebSocket ws, object obj) =>
-        ws.SendAsync(
-            Encoding.UTF8.GetBytes(JsonSerializer.Serialize(obj)),
-            WebSocketMessageType.Text,
-            endOfMessage: true,
-            CancellationToken.None);
+    private Task SendJsonAsync(WebSocket ws, object obj) =>
+        SendTextAsync(ws, JsonSerializer.Serialize(obj));
+
+    /// <summary>_sendLockで直列化して送信。受信ループの応答とダッシュボード起点の
+    /// configプッシュが同じソケットに並行して SendAsync しないようにする。</summary>
+    private async Task SendTextAsync(WebSocket ws, string json)
+    {
+        await _sendLock.WaitAsync();
+        try
+        {
+            await ws.SendAsync(
+                Encoding.UTF8.GetBytes(json),
+                WebSocketMessageType.Text,
+                endOfMessage: true,
+                CancellationToken.None);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
 }

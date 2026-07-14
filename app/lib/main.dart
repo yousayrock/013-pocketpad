@@ -8,6 +8,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'launcher.dart';
+import 'settings.dart';
+import 'settings_screen.dart';
 import 'trackpad.dart';
 import 'youtube.dart';
 
@@ -390,8 +392,6 @@ class TrackpadScreen extends StatefulWidget {
 }
 
 class _TrackpadScreenState extends State<TrackpadScreen> {
-  static const _sensitivity = 1.4;
-
   // 入力欄の先頭に置く番兵（ゼロ幅スペース）。これが消えた＝空欄で
   // バックスペースが押されたと分かるので、PCへbackspaceを転送する。
   static final _zwsp = String.fromCharCode(0x200B);
@@ -404,11 +404,22 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   final _text = TextEditingController(text: _zwsp);
   bool _showKeyboard = false;
   final _textFocus = FocusNode();
-  int _tab = 0; // 0=トラックパッド, 1=ランチャー
+  int _tab = 0; // 表示中ページ（_settings.visiblePages のインデックス）
+  AppSettings _settings = AppSettings.defaults();
+  late final Future<AppSettings> _settingsFuture;
+
+  /// PCからのconfigを適用済みか。ローカルload完了が後から来ても上書きしない。
+  bool _remoteConfigApplied = false;
 
   @override
   void initState() {
     super.initState();
+    _settingsFuture = AppSettings.load();
+    _settingsFuture.then((s) {
+      if (!mounted || _remoteConfigApplied) return;
+      s.onSaved = _pushConfig;
+      setState(() => _settings = s);
+    });
     // 8ms間引き集約（protocol.md v1）
     _flush = Timer.periodic(const Duration(milliseconds: 8), (_) => _flushMove());
     _ping = Timer.periodic(const Duration(seconds: 5), (_) {
@@ -416,6 +427,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     });
     _sub = widget.stream.listen(_onMessage,
         onDone: _disconnected, onError: (_) => _disconnected());
+    // 設定同期はスマホ主導（listen登録後に送るので応答を取りこぼさない）。
+    // PCに保存があれば config、なければ config_request が返る。
+    _sendJson({'type': 'config_get'});
   }
 
   /// PCからの受信処理。スクショ結果を受け取ったらプレビュー画面へ。
@@ -435,8 +449,30 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     } else if (j['type'] == 'screenshot_error' && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('スクショの取得に失敗しました'), backgroundColor: kMagenta));
+    } else if (j['type'] == 'config' && j['settings'] is Map) {
+      // PC保存の設定を適用+永続化（config_setは送り返さない=ループ防止）
+      final s = AppSettings.fromJson(
+          (j['settings'] as Map).cast<String, dynamic>());
+      _remoteConfigApplied = true;
+      s.onSaved = _pushConfig;
+      s.save(notify: false);
+      if (mounted) {
+        setState(() {
+          _settings = s;
+          _tab = _tab.clamp(0, s.visiblePages.length - 1);
+        });
+      }
+    } else if (j['type'] == 'config_request') {
+      // PC未保存（初回）。ローカルload完了を待ってから現在設定を送る
+      _settingsFuture.then((_) {
+        if (mounted) _pushConfig(_settings.toJson());
+      });
     }
   }
+
+  /// 現在設定をPCへ送って保存させる（AppSettings.saveのフックからも呼ばれる）。
+  void _pushConfig(Map<String, dynamic> json) =>
+      _sendJson({'type': 'config_set', 'settings': json});
 
   void _disconnected() {
     if (!mounted) return;
@@ -468,8 +504,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       widget.channel.sink.add(jsonEncode(obj));
 
   void _move(double dx, double dy) {
-    _dx += dx * _sensitivity;
-    _dy += dy * _sensitivity;
+    _dx += dx * _settings.sensitivity;
+    _dy += dy * _settings.sensitivity;
   }
 
   void _shortcut(List<String> keys) =>
@@ -489,43 +525,14 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final pages = _settings.visiblePages;
+    final tab = _tab.clamp(0, pages.length - 1);
     return Scaffold(
       body: SafeArea(
         child: Column(
         children: [
-          // ページ本体（トラックパッド / マクロ / YouTube。操作バーのスワイプで移動）
-          Expanded(
-            child: _tab == 2
-                ? YoutubePanel(
-                    onSend: _sendJson,
-                    onMove: _move,
-                    onScroll: (dy) => _scroll += dy,
-                  )
-                : _tab == 1
-                    ? LauncherPanel(
-                        buttons: defaultDeck,
-                        onSend: _sendJson,
-                        onMove: _move,
-                        onScroll: (dy) => _scroll += dy,
-                      )
-                    : TrackpadArea(
-                        onMove: _move,
-                        onScroll: (dy) => _scroll += dy,
-                        onClick: (button, action) => _sendJson({
-                          'type': 'click',
-                          'button': button,
-                          'action': action
-                        }),
-                        bottomMargin: 8,
-                        child: const Center(
-                          child: Text(
-                            'トラックパッド\nタップ=左クリック / 長押し=右クリック\nタップ後すぐなぞる=掴んで移動',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(color: Colors.white24),
-                          ),
-                        ),
-                      ),
-          ),
+          // ページ本体（表示設定に応じてトラックパッド / マクロ / YouTube）
+          Expanded(child: _buildPage(pages[tab])),
           // テキスト入力（どの画面でもキーボードトグルで表示）
           if (_showKeyboard)
             Padding(
@@ -562,13 +569,14 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
             ),
           // ページ切替バー（帯全体・高さ44で受ける。操作ボタン行とは別の行なので
           // タップ判定の競合は起きない）。左半分タップ=前ページ、右半分=次ページ、
-          // 横スワイプでも切替できる。
+          // 横スワイプでも切替できる。右端は設定への歯車（常設。下部ボタン行は
+          // 非表示にできるため、消えない場所に置く）。
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onHorizontalDragEnd: (d) {
               final v = d.primaryVelocity ?? 0;
-              if (v < -50 && _tab < 2) setState(() => _tab++);
-              if (v > 50 && _tab > 0) setState(() => _tab--);
+              if (v < -50 && tab < pages.length - 1) setState(() => _tab = tab + 1);
+              if (v > 50 && tab > 0) setState(() => _tab = tab - 1);
             },
             child: SizedBox(
               height: 44,
@@ -578,25 +586,25 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: () {
-                        if (_tab > 0) setState(() => _tab--);
+                        if (tab > 0) setState(() => _tab = tab - 1);
                       },
                       child: Icon(Icons.chevron_left,
                           size: 28,
-                          color: _tab > 0 ? kAccent : Colors.white12),
+                          color: tab > 0 ? kAccent : Colors.white12),
                     ),
                   ),
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: List.generate(
-                      3,
+                      pages.length,
                       (i) => AnimatedContainer(
                         duration: const Duration(milliseconds: 150),
-                        width: _tab == i ? 22 : 10,
+                        width: tab == i ? 22 : 10,
                         height: 10,
                         margin: const EdgeInsets.symmetric(horizontal: 4),
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(5),
-                          color: _tab == i ? kAccent : Colors.white24,
+                          color: tab == i ? kAccent : Colors.white24,
                         ),
                       ),
                     ),
@@ -605,36 +613,104 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: () {
-                        if (_tab < 2) setState(() => _tab++);
+                        if (tab < pages.length - 1) setState(() => _tab = tab + 1);
                       },
                       child: Icon(Icons.chevron_right,
                           size: 28,
-                          color: _tab < 2 ? kAccent : Colors.white12),
+                          color:
+                              tab < pages.length - 1 ? kAccent : Colors.white12),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 44,
+                    child: IconButton(
+                      icon: const Icon(Icons.settings,
+                          size: 22, color: Colors.white38),
+                      onPressed: _openSettings,
                     ),
                   ),
                 ],
               ),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Row(
-              children: [
-                _iconBtn(Icons.keyboard_return, () => _shortcut(['enter'])),
-                _backspaceBtn(),
-                _iconBtn(
-                    _showKeyboard ? Icons.keyboard_hide : Icons.keyboard,
-                    () => setState(() => _showKeyboard = !_showKeyboard)),
-                _iconBtn(Icons.swap_horiz, () => _shortcut(['alt', 'tab'])),
-                _iconBtn(Icons.window, () => _shortcut(['win'])),
-              ],
+          if (_settings.enabledBottomButtons.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Row(
+                children: [
+                  for (final id in _settings.enabledBottomButtons)
+                    _bottomBtnById(id),
+                ],
+              ),
             ),
-          ),
           const SizedBox(height: 8),
         ],
       ),
       ),
     );
+  }
+
+  /// ページIDから本体ウィジェットを生成。
+  Widget _buildPage(String id) {
+    switch (id) {
+      case 'youtube':
+        return YoutubePanel(
+          onSend: _sendJson,
+          onMove: _move,
+          onScroll: (dy) => _scroll += dy,
+        );
+      case 'macro':
+        return LauncherPanel(
+          buttons: _settings.deck,
+          onSend: _sendJson,
+          onMove: _move,
+          onScroll: (dy) => _scroll += dy,
+        );
+      default: // trackpad
+        return TrackpadArea(
+          onMove: _move,
+          onScroll: (dy) => _scroll += dy,
+          onClick: (button, action) => _sendJson(
+              {'type': 'click', 'button': button, 'action': action}),
+          bottomMargin: 8,
+          child: const Center(
+            child: Text(
+              'トラックパッド\nタップ=左クリック / 長押し=右クリック\nタップ後すぐなぞる=掴んで移動',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white24),
+            ),
+          ),
+        );
+    }
+  }
+
+  /// 下部操作ボタンをIDから生成（表示・並び順は設定に従う）。
+  Widget _bottomBtnById(String id) {
+    switch (id) {
+      case 'enter':
+        return _iconBtn(Icons.keyboard_return, () => _shortcut(['enter']));
+      case 'backspace':
+        return _backspaceBtn();
+      case 'keyboard':
+        return _iconBtn(_showKeyboard ? Icons.keyboard_hide : Icons.keyboard,
+            () => setState(() => _showKeyboard = !_showKeyboard));
+      case 'alttab':
+        return _iconBtn(Icons.swap_horiz, () => _shortcut(['alt', 'tab']));
+      case 'win':
+        return _iconBtn(Icons.window, () => _shortcut(['win']));
+      default:
+        return const SizedBox.shrink();
+    }
+  }
+
+  Future<void> _openSettings() async {
+    await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => SettingsScreen(settings: _settings)));
+    if (!mounted) return;
+    // 設定画面でページ構成が変わった可能性があるので反映＋タブを範囲内に収める
+    setState(() {
+      _tab = _tab.clamp(0, _settings.visiblePages.length - 1);
+    });
   }
 
   /// バックスペースボタン。タップで1文字、長押しで連続削除。

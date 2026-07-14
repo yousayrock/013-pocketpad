@@ -1,0 +1,720 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PocketPad 設定ダッシュボード</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+<style>
+:root {
+  --bg: #050810; --panel: #0A1020; --panel2: #101a30;
+  --accent: #00F5FF; --magenta: #FF006E; --text: #E8ECF4;
+  --dim: #7a8699; --line: rgba(0,245,255,.18);
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: "Segoe UI", "Yu Gothic UI", sans-serif; font-size: 14px;
+}
+.wrap { max-width: 920px; margin: 0 auto; padding: 16px 16px 80px; }
+header {
+  position: sticky; top: 0; z-index: 10; background: rgba(5,8,16,.92);
+  backdrop-filter: blur(4px); border-bottom: 1px solid var(--line);
+}
+.head-in { max-width: 920px; margin: 0 auto; padding: 12px 16px; display: flex; align-items: center; gap: 12px; }
+h1 { font-size: 18px; margin: 0; color: var(--accent); flex: 1; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: #444; display: inline-block; margin-right: 6px; }
+.dot.on { background: #35e07a; box-shadow: 0 0 8px #35e07a; }
+#connLabel { color: var(--dim); font-size: 12px; }
+button {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px;
+}
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: var(--accent); color: #001018; font-weight: bold; border: none; }
+button.danger { color: #ff6b6b; border-color: rgba(255,80,80,.4); }
+section {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  padding: 16px; margin-top: 16px;
+}
+section h2 { font-size: 14px; margin: 0 0 12px; color: var(--dim); letter-spacing: .05em; }
+.row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid transparent; border-radius: 10px; background: var(--panel2); margin-top: 6px;
+}
+.row.dragging { opacity: .35; }
+.row.dragover { border-color: var(--accent); }
+.row .grip { color: var(--dim); cursor: grab; user-select: none; }
+.row .name { flex: 1; }
+.row .sub { color: var(--dim); font-size: 12px; }
+.mi { font-family: "Material Icons"; font-size: 22px; line-height: 1; vertical-align: middle; }
+body.no-icons .mi { font-family: inherit; font-size: 9px; word-break: break-all; max-width: 48px; display: inline-block; }
+.deck-icon {
+  width: 38px; height: 38px; border-radius: 9px; display: flex; align-items: center;
+  justify-content: center; border: 1.5px solid; flex: none;
+}
+.switch { position: relative; width: 40px; height: 22px; flex: none; }
+.switch input { display: none; }
+.switch span {
+  position: absolute; inset: 0; border-radius: 11px; background: #333; transition: .15s; cursor: pointer;
+}
+.switch span::after {
+  content: ""; position: absolute; width: 16px; height: 16px; border-radius: 50%;
+  background: #999; top: 3px; left: 3px; transition: .15s;
+}
+.switch input:checked + span { background: rgba(0,245,255,.35); }
+.switch input:checked + span::after { background: var(--accent); left: 21px; }
+input[type=range] { accent-color: var(--accent); }
+input[type=text], input[type=number], textarea, select {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; font-size: 14px; width: 100%;
+}
+textarea { font-family: Consolas, monospace; font-size: 13px; }
+label.fld { display: block; margin-top: 12px; color: var(--dim); font-size: 12px; }
+label.fld > * { margin-top: 4px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.chip {
+  border: 1px solid var(--line); border-radius: 16px; padding: 5px 12px; cursor: pointer;
+  font-size: 12px; user-select: none;
+}
+.chip.on { background: rgba(0,245,255,.2); border-color: var(--accent); color: var(--accent); }
+.icon-grid { display: grid; grid-template-columns: repeat(auto-fill, 44px); gap: 6px; margin-top: 8px; }
+.icon-cell {
+  width: 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+  border-radius: 8px; border: 1px solid transparent; cursor: pointer; color: #b8c2d5;
+}
+.icon-cell:hover { border-color: var(--line); }
+.icon-cell.on { border-color: var(--accent); background: rgba(0,245,255,.15); color: var(--accent); }
+.palette { display: flex; gap: 10px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
+.swatch {
+  width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 3px solid transparent;
+}
+.swatch.on { border-color: #fff; }
+.modal-bg {
+  position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50;
+  display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 40px 16px;
+}
+.modal {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  width: 640px; max-width: 100%; padding: 20px;
+}
+.modal h3 { margin: 0 0 8px; color: var(--accent); font-size: 16px; }
+.modal .foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.preset-item { cursor: pointer; }
+.preset-item:hover { border-color: var(--accent); }
+.step-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.step-row select { width: 130px; flex: none; }
+#toast {
+  position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: var(--panel2); border: 1px solid var(--accent); color: var(--text);
+  padding: 10px 20px; border-radius: 10px; z-index: 99; display: none;
+}
+#waiting { text-align: center; padding: 60px 0; color: var(--dim); }
+.add-bar { display: flex; gap: 10px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<header><div class="head-in">
+  <h1>PocketPad 設定</h1>
+  <span><span class="dot" id="connDot"></span><span id="connLabel">確認中…</span></span>
+  <button id="reloadBtn" title="PCの保存内容を読み直す">再読み込み</button>
+  <button id="saveBtn" class="primary" disabled>保存してスマホに反映</button>
+</div></header>
+
+<div class="wrap">
+  <div id="waiting">設定を読み込み中…<br><br>
+    <span style="font-size:12px">初回はスマホを一度PCに接続すると設定が同期され、ここで編集できるようになります。</span>
+  </div>
+  <div id="main" style="display:none">
+    <section>
+      <h2>トラックパッド感度</h2>
+      <div style="display:flex;align-items:center;gap:14px">
+        <input type="range" id="sens" min="0.5" max="3" step="0.1" style="flex:1">
+        <span id="sensVal" style="color:var(--accent);width:36px;text-align:right"></span>
+      </div>
+    </section>
+    <section>
+      <h2>ページ（表示と並び順）</h2>
+      <div id="pagesList"></div>
+    </section>
+    <section>
+      <h2>下部の操作ボタン（表示と並び順）</h2>
+      <div id="bottomList"></div>
+    </section>
+    <section>
+      <h2>マクロボタン</h2>
+      <div id="deckList"></div>
+      <div class="add-bar">
+        <button id="addPresetBtn" class="primary">＋ プリセットから追加</button>
+        <button id="addNewBtn">＋ 新規作成</button>
+      </div>
+    </section>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+// ─────────────────────────── 定数（スマホ側 settings.dart と同期を保つこと）
+const PAGE_NAMES = { trackpad: "トラックパッド", macro: "マクロ", youtube: "YouTube" };
+const PAGE_ICONS = { trackpad: "touch_app", macro: "grid_view", youtube: "play_circle_outline" };
+const BOTTOM_NAMES = { enter: "Enter", backspace: "バックスペース", keyboard: "キーボード表示",
+                       alttab: "タスク切替（Alt+Tab）", win: "Winキー" };
+const BOTTOM_ICONS = { enter: "keyboard_return", backspace: "backspace", keyboard: "keyboard",
+                       alttab: "swap_horiz", win: "window" };
+
+// アイコンカタログ（settings.dart kIconCatalog と同じ名前セット）
+const ICON_NAMES = [
+  "copy","content_paste","content_cut","undo","select_all","fullscreen","desktop_windows",
+  "swap_horiz","note","calculate","public","lock","redo","save","search","folder","folder_open",
+  "home","settings","star","favorite","bolt","play_arrow","pause","stop","skip_next","skip_previous",
+  "volume_up","volume_down","volume_off","mic","camera_alt","movie","music_note","headphones",
+  "sports_esports","terminal","code","keyboard","mouse","print","wifi","bluetooth","power_settings_new",
+  "refresh","delete","edit","mail","chat","alarm","schedule","download","upload","link","language",
+  "light_mode","dark_mode","apps","rocket_launch","widgets"
+];
+// Flutter名 → Material Icons Webフォントのリガチャ名（違うものだけ）
+const ICON_LIGATURE = { copy: "content_copy" };
+const lig = (name) => ICON_LIGATURE[name] || name;
+
+// カラーパレット（settings.dart kColorPalette と同値）
+const PALETTE = ["#00F5FF","#FF006E","#FFD740","#FF5252","#69F0AE","#FFAB40","#E040FB","#40C4FF"];
+const CYAN = argb("#00F5FF"), MAGENTA = argb("#FF006E"), AMBER = argb("#FFD740"),
+      RED = argb("#FF5252"), GREEN = argb("#69F0AE"), ORANGE = argb("#FFAB40"),
+      PURPLE = argb("#E040FB"), BLUE = argb("#40C4FF");
+
+function argb(hex) { return (0xFF000000 + parseInt(hex.slice(1), 16)) >>> 0; }
+function hexOf(colorInt) { return "#" + (colorInt & 0xFFFFFF).toString(16).padStart(6, "0"); }
+
+// ─────────────────────────── プリセットカタログ
+const sc = (keys) => ({ type: "shortcut", keys });
+const PRESETS = {
+  "編集": [
+    { label: "コピー", icon: "copy", color: CYAN, message: sc(["ctrl","c"]) },
+    { label: "貼り付け", icon: "content_paste", color: CYAN, message: sc(["ctrl","v"]) },
+    { label: "切り取り", icon: "content_cut", color: CYAN, message: sc(["ctrl","x"]) },
+    { label: "元に戻す", icon: "undo", color: CYAN, message: sc(["ctrl","z"]) },
+    { label: "やり直し", icon: "redo", color: CYAN, message: sc(["ctrl","y"]) },
+    { label: "全選択", icon: "select_all", color: CYAN, message: sc(["ctrl","a"]) },
+    { label: "保存", icon: "save", color: CYAN, message: sc(["ctrl","s"]) },
+    { label: "検索", icon: "search", color: CYAN, message: sc(["ctrl","f"]) },
+    { label: "置換", icon: "edit", color: CYAN, message: sc(["ctrl","h"]) },
+    { label: "クリップボード履歴", icon: "content_paste", color: CYAN, message: sc(["win","v"]) },
+  ],
+  "ウィンドウ": [
+    { label: "デスクトップ", icon: "desktop_windows", color: MAGENTA, message: sc(["win","d"]) },
+    { label: "タスク切替", icon: "swap_horiz", color: MAGENTA, message: sc(["alt","tab"]) },
+    { label: "タスクビュー", icon: "apps", color: MAGENTA, message: sc(["win","tab"]) },
+    { label: "ウィンドウを閉じる", icon: "stop", color: MAGENTA, message: sc(["alt","f4"]) },
+    { label: "最大化", icon: "fullscreen", color: MAGENTA, message: sc(["win","up"]) },
+    { label: "最小化", icon: "download", color: MAGENTA, message: sc(["win","down"]) },
+    { label: "左にスナップ", icon: "skip_previous", color: MAGENTA, message: sc(["win","left"]) },
+    { label: "右にスナップ", icon: "skip_next", color: MAGENTA, message: sc(["win","right"]) },
+    { label: "仮想デスクトップ ←", icon: "undo", color: MAGENTA, message: sc(["win","ctrl","left"]) },
+    { label: "仮想デスクトップ →", icon: "redo", color: MAGENTA, message: sc(["win","ctrl","right"]) },
+    { label: "Windows設定", icon: "settings", color: MAGENTA, message: sc(["win","i"]) },
+    { label: "PCロック", icon: "lock", color: RED, message: sc(["win","l"]) },
+  ],
+  "起動": [
+    { label: "メモ帳", icon: "note", color: AMBER, message: { type: "launch", target: "notepad.exe" } },
+    { label: "電卓", icon: "calculate", color: AMBER, message: { type: "launch", target: "calc.exe" } },
+    { label: "ペイント", icon: "edit", color: AMBER, message: { type: "launch", target: "mspaint.exe" } },
+    { label: "エクスプローラー", icon: "folder", color: AMBER, message: sc(["win","e"]) },
+    { label: "ターミナル", icon: "terminal", color: AMBER, message: { type: "launch", target: "wt.exe" } },
+    { label: "コマンドプロンプト", icon: "terminal", color: AMBER, message: { type: "launch", target: "cmd.exe" } },
+    { label: "タスクマネージャー", icon: "apps", color: AMBER, message: sc(["ctrl","shift","esc"]) },
+    { label: "コントロールパネル", icon: "settings", color: AMBER, message: { type: "launch", target: "control.exe" } },
+  ],
+  "ブラウザ": [
+    { label: "Google", icon: "public", color: BLUE, message: { type: "launch", target: "https://www.google.com" } },
+    { label: "YouTube", icon: "play_arrow", color: RED, message: { type: "launch", target: "https://www.youtube.com" } },
+    { label: "Gmail", icon: "mail", color: BLUE, message: { type: "launch", target: "https://mail.google.com" } },
+    { label: "新しいタブ", icon: "language", color: BLUE, message: sc(["ctrl","t"]) },
+    { label: "タブを閉じる", icon: "delete", color: BLUE, message: sc(["ctrl","w"]) },
+    { label: "閉じたタブを復元", icon: "refresh", color: BLUE, message: sc(["ctrl","shift","t"]) },
+    { label: "再読み込み", icon: "refresh", color: BLUE, message: sc(["f5"]) },
+    { label: "戻る", icon: "undo", color: BLUE, message: sc(["alt","left"]) },
+    { label: "進む", icon: "redo", color: BLUE, message: sc(["alt","right"]) },
+    { label: "ズーム＋", icon: "search", color: BLUE, message: sc(["ctrl","plus"]) },
+    { label: "ズーム−", icon: "search", color: BLUE, message: sc(["ctrl","minus"]) },
+    { label: "ブラウザ全画面", icon: "fullscreen", color: BLUE, message: sc(["f11"]) },
+  ],
+  "キャプチャ": [
+    { label: "スクショ（スマホへ）", icon: "fullscreen", color: MAGENTA, message: { type: "screenshot" } },
+    { label: "範囲切り取り", icon: "content_cut", color: MAGENTA, message: sc(["win","shift","s"]) },
+    { label: "PrintScreen", icon: "camera_alt", color: MAGENTA, message: sc(["prtsc"]) },
+    { label: "録画（ゲームバー）", icon: "movie", color: MAGENTA, message: sc(["win","alt","r"]) },
+  ],
+  "メディア": [
+    { label: "再生 / 一時停止", icon: "play_arrow", color: GREEN, message: sc(["playpause"]) },
+    { label: "次の曲", icon: "skip_next", color: GREEN, message: sc(["nexttrack"]) },
+    { label: "前の曲", icon: "skip_previous", color: GREEN, message: sc(["prevtrack"]) },
+    { label: "音量 ＋", icon: "volume_up", color: GREEN, message: sc(["volup"]) },
+    { label: "音量 −", icon: "volume_down", color: GREEN, message: sc(["voldown"]) },
+    { label: "ミュート", icon: "volume_off", color: GREEN, message: sc(["mute"]) },
+  ],
+  "電源": [
+    { label: "スリープ", icon: "dark_mode", color: PURPLE, message: { type: "power", action: "sleep" } },
+    { label: "シャットダウン", icon: "power_settings_new", color: RED, message: { type: "power", action: "shutdown" } },
+    { label: "再起動", icon: "refresh", color: ORANGE, message: { type: "power", action: "restart" } },
+  ],
+  "マクロ例": [
+    { label: "cmdを開く", icon: "terminal", color: CYAN, message: { type: "macro", steps: [
+        sc(["win","r"]), { type: "delay", ms: 400 }, { type: "text", text: "cmd" },
+        { type: "delay", ms: 100 }, sc(["enter"]) ] } },
+    { label: "定型文＋送信", icon: "chat", color: CYAN, message: { type: "macro", steps: [
+        { type: "text", text: "お疲れ様です。" }, sc(["enter"]) ] } },
+  ],
+};
+
+// ─────────────────────────── 状態
+let cfg = null;
+let dirty = false;
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+
+function markDirty() {
+  dirty = true;
+  $("saveBtn").disabled = false;
+}
+
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.style.display = "block";
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.style.display = "none", 3000);
+}
+
+function summarize(m) {
+  switch (m.type) {
+    case "shortcut": return "ショートカット: " + (m.keys || []).join(" + ");
+    case "launch": return "起動: " + (m.target || "");
+    case "text": return "テキスト入力: " + (m.text || "");
+    case "screenshot": return "スクリーンショット";
+    case "power": return "電源: " + ({ sleep:"スリープ", shutdown:"シャットダウン", restart:"再起動" }[m.action] || m.action);
+    case "macro": return "マクロ（" + (Array.isArray(m.steps) ? m.steps.length : "?") + "ステップ）";
+    default: return "JSON: " + JSON.stringify(m);
+  }
+}
+
+function iconSpan(name, colorCss) {
+  return `<span class="mi" style="color:${colorCss}">${esc(lig(name))}</span>`;
+}
+
+// ─────────────────────────── DnD（配列の並び替え共通ヘルパー）
+function makeSortable(listEl, array, rerender) {
+  [...listEl.children].forEach((row, i) => {
+    row.draggable = true;
+    row.addEventListener("dragstart", (e) => {
+      listEl._from = i;
+      row.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+    });
+    row.addEventListener("dragend", () => row.classList.remove("dragging"));
+    row.addEventListener("dragover", (e) => { e.preventDefault(); row.classList.add("dragover"); });
+    row.addEventListener("dragleave", () => row.classList.remove("dragover"));
+    row.addEventListener("drop", (e) => {
+      e.preventDefault();
+      row.classList.remove("dragover");
+      const from = listEl._from;
+      if (from == null || from === i) return;
+      array.splice(i, 0, array.splice(from, 1)[0]);
+      markDirty();
+      rerender();
+    });
+  });
+}
+
+// ─────────────────────────── 描画
+function render() {
+  $("waiting").style.display = "none";
+  $("main").style.display = "block";
+  $("sens").value = cfg.sensitivity;
+  $("sensVal").textContent = Number(cfg.sensitivity).toFixed(1);
+  renderToggleList($("pagesList"), cfg.pages, PAGE_NAMES, PAGE_ICONS, true);
+  renderToggleList($("bottomList"), cfg.bottomButtons, BOTTOM_NAMES, BOTTOM_ICONS, false);
+  renderDeck();
+}
+
+function renderToggleList(el, entries, names, icons, minOne) {
+  el.innerHTML = "";
+  entries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `
+      <span class="grip mi">drag_indicator</span>
+      ${iconSpan(icons[entry.id] || "widgets", entry.enabled ? "var(--accent)" : "var(--dim)")}
+      <span class="name" style="${entry.enabled ? "" : "color:var(--dim)"}">${esc(names[entry.id] || entry.id)}</span>
+      <label class="switch"><input type="checkbox" ${entry.enabled ? "checked" : ""}><span></span></label>`;
+    row.querySelector("input").addEventListener("change", (e) => {
+      if (minOne && !e.target.checked && entries.filter(x => x.enabled).length <= 1) {
+        e.target.checked = true;
+        toast("最低1ページは表示が必要です");
+        return;
+      }
+      entry.enabled = e.target.checked;
+      markDirty();
+      render();
+    });
+    el.appendChild(row);
+  });
+  makeSortable(el, entries, render);
+}
+
+function renderDeck() {
+  const el = $("deckList");
+  el.innerHTML = "";
+  cfg.deck.forEach((b, i) => {
+    const hex = hexOf(b.color);
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `
+      <span class="grip mi">drag_indicator</span>
+      <span class="deck-icon" style="border-color:${hex}66;background:${hex}1f">${iconSpan(b.icon, hex)}</span>
+      <span class="name">${esc(b.label)}<br><span class="sub">${esc(summarize(b.message))}</span></span>
+      <button data-act="edit">編集</button>
+      <button data-act="dup" title="複製">⧉</button>
+      <button data-act="del" class="danger">削除</button>`;
+    row.querySelector('[data-act=edit]').onclick = () => openEditor(b, (nb) => { cfg.deck[i] = nb; markDirty(); renderDeck(); });
+    row.querySelector('[data-act=dup]').onclick = () => { cfg.deck.splice(i + 1, 0, JSON.parse(JSON.stringify(b))); markDirty(); renderDeck(); };
+    row.querySelector('[data-act=del]').onclick = () => {
+      if (confirm(`「${b.label}」を削除しますか？`)) { cfg.deck.splice(i, 1); markDirty(); renderDeck(); }
+    };
+    el.appendChild(row);
+  });
+  makeSortable(el, cfg.deck, renderDeck);
+}
+
+// ─────────────────────────── プリセットピッカー
+function openPresetPicker() {
+  const cats = Object.keys(PRESETS);
+  let cur = cats[0];
+  const bg = modal(`
+    <h3>プリセットから追加</h3>
+    <div class="tabs" id="pTabs"></div>
+    <div id="pList"></div>
+    <div class="foot"><button id="pClose">閉じる</button></div>`);
+  const drawTabs = () => {
+    const tabs = bg.querySelector("#pTabs");
+    tabs.innerHTML = "";
+    cats.forEach(c => {
+      const chip = document.createElement("span");
+      chip.className = "chip" + (c === cur ? " on" : "");
+      chip.textContent = c;
+      chip.onclick = () => { cur = c; drawTabs(); drawList(); };
+      tabs.appendChild(chip);
+    });
+  };
+  const drawList = () => {
+    const list = bg.querySelector("#pList");
+    list.innerHTML = "";
+    PRESETS[cur].forEach(p => {
+      const hex = hexOf(p.color);
+      const row = document.createElement("div");
+      row.className = "row preset-item";
+      row.innerHTML = `
+        <span class="deck-icon" style="border-color:${hex}66;background:${hex}1f">${iconSpan(p.icon, hex)}</span>
+        <span class="name">${esc(p.label)}<br><span class="sub">${esc(summarize(p.message))}</span></span>
+        <span class="sub">クリックで追加</span>`;
+      row.onclick = () => {
+        cfg.deck.push(JSON.parse(JSON.stringify(p)));
+        markDirty();
+        renderDeck();
+        toast(`「${p.label}」を追加しました（保存を忘れずに）`);
+      };
+      list.appendChild(row);
+    });
+  };
+  drawTabs(); drawList();
+  bg.querySelector("#pClose").onclick = () => bg.remove();
+}
+
+// ─────────────────────────── ボタン編集モーダル
+const MODS = ["ctrl", "alt", "shift", "win"];
+
+function openEditor(button, onDone) {
+  const b = button ? JSON.parse(JSON.stringify(button))
+                   : { label: "", icon: "bolt", color: CYAN, message: sc([]) };
+  // messageをフォーム状態へ展開
+  const m = b.message || {};
+  let type = ["shortcut","launch","text","screenshot","power","macro"].includes(m.type) ? m.type : "json";
+  const st = {
+    mods: new Set((m.type === "shortcut" ? (m.keys || []) : []).filter(k => MODS.includes(k))),
+    key: m.type === "shortcut" ? (m.keys || []).filter(k => !MODS.includes(k)).join(" ") : "",
+    target: m.target || "",
+    text: m.type === "text" ? (m.text || "") : "",
+    power: m.action || "sleep",
+    steps: m.type === "macro" && Array.isArray(m.steps) ? JSON.parse(JSON.stringify(m.steps)) : [],
+    json: JSON.stringify(m, null, 2),
+  };
+  // shortcutで修飾キーの後にさらに修飾キー単独（例 ["win"]）だった場合の補正
+  if (m.type === "shortcut" && st.key === "" && st.mods.size === 1) {
+    st.key = [...st.mods][0]; st.mods.clear();
+  }
+
+  const bg = modal(`
+    <h3>${button ? "ボタンを編集" : "ボタンを新規作成"}</h3>
+    <div style="display:flex;gap:14px;align-items:center">
+      <span class="deck-icon" id="ePrev" style="width:56px;height:56px"></span>
+      <label class="fld" style="flex:1;margin-top:0">ラベル<input type="text" id="eLabel"></label>
+    </div>
+    <label class="fld">アイコン<div class="icon-grid" id="eIcons"></div></label>
+    <label class="fld">色<div class="palette" id="ePal">
+      <input type="color" id="eColor" title="カスタム色" style="width:34px;height:34px;padding:0;border-radius:8px">
+    </div></label>
+    <label class="fld">アクション<div class="chips" id="eTypes"></div></label>
+    <div id="eForm"></div>
+    <div class="foot">
+      <button id="eCancel">キャンセル</button>
+      <button id="eOk" class="primary">OK</button>
+    </div>`);
+
+  const q = (sel) => bg.querySelector(sel);
+  q("#eLabel").value = b.label;
+
+  const drawPrev = () => {
+    const hex = hexOf(b.color);
+    q("#ePrev").style.borderColor = hex + "99";
+    q("#ePrev").style.background = hex + "1f";
+    q("#ePrev").innerHTML = iconSpan(b.icon, hex);
+  };
+  const drawIcons = () => {
+    const grid = q("#eIcons");
+    grid.innerHTML = "";
+    ICON_NAMES.forEach(n => {
+      const c = document.createElement("span");
+      c.className = "icon-cell" + (n === b.icon ? " on" : "");
+      c.innerHTML = `<span class="mi">${esc(lig(n))}</span>`;
+      c.title = n;
+      c.onclick = () => { b.icon = n; drawIcons(); drawPrev(); };
+      grid.appendChild(c);
+    });
+  };
+  const drawPal = () => {
+    [...q("#ePal").querySelectorAll(".swatch")].forEach(x => x.remove());
+    PALETTE.forEach(hex => {
+      const s = document.createElement("span");
+      s.className = "swatch" + (argb(hex) === (b.color >>> 0) ? " on" : "");
+      s.style.background = hex;
+      s.onclick = () => { b.color = argb(hex); drawPal(); drawPrev(); };
+      q("#ePal").insertBefore(s, q("#eColor"));
+    });
+    q("#eColor").value = hexOf(b.color);
+  };
+  q("#eColor").addEventListener("input", (e) => { b.color = argb(e.target.value); drawPal(); drawPrev(); });
+
+  const TYPE_LABELS = { shortcut: "ショートカット", launch: "アプリ/URL起動", text: "テキスト入力",
+                        screenshot: "スクショ", power: "電源", macro: "マクロ(手順)", json: "JSON直編集" };
+  const drawTypes = () => {
+    const el = q("#eTypes");
+    el.innerHTML = "";
+    Object.entries(TYPE_LABELS).forEach(([t, name]) => {
+      const chip = document.createElement("span");
+      chip.className = "chip" + (t === type ? " on" : "");
+      chip.textContent = name;
+      chip.onclick = () => { type = t; drawTypes(); drawForm(); };
+      el.appendChild(chip);
+    });
+  };
+
+  const drawForm = () => {
+    const f = q("#eForm");
+    if (type === "shortcut") {
+      f.innerHTML = `<div class="chips" id="fMods"></div>
+        <label class="fld">キー（スペース区切りで複数可）
+          <input type="text" id="fKey" placeholder="例: c / enter / tab / f5 / delete / volup"></label>`;
+      const drawMods = () => {
+        const el = f.querySelector("#fMods");
+        el.innerHTML = "";
+        MODS.forEach(mod => {
+          const chip = document.createElement("span");
+          chip.className = "chip" + (st.mods.has(mod) ? " on" : "");
+          chip.textContent = mod.toUpperCase();
+          chip.onclick = () => { st.mods.has(mod) ? st.mods.delete(mod) : st.mods.add(mod); drawMods(); };
+          el.appendChild(chip);
+        });
+      };
+      drawMods();
+      f.querySelector("#fKey").value = st.key;
+      f.querySelector("#fKey").oninput = (e) => st.key = e.target.value;
+    } else if (type === "launch") {
+      f.innerHTML = `<label class="fld">起動対象（exe / URL / フォルダ）
+        <input type="text" id="fTarget" placeholder="例: notepad.exe / https://example.com"></label>`;
+      f.querySelector("#fTarget").value = st.target;
+      f.querySelector("#fTarget").oninput = (e) => st.target = e.target.value;
+    } else if (type === "text") {
+      f.innerHTML = `<label class="fld">PCに入力するテキスト<textarea id="fText" rows="3"></textarea></label>`;
+      f.querySelector("#fText").value = st.text;
+      f.querySelector("#fText").oninput = (e) => st.text = e.target.value;
+    } else if (type === "screenshot") {
+      f.innerHTML = `<p class="sub" style="color:var(--dim)">PCの全画面を撮ってスマホに表示します。設定項目はありません。</p>`;
+    } else if (type === "power") {
+      f.innerHTML = `<label class="fld">操作<select id="fPower">
+        <option value="sleep">スリープ</option>
+        <option value="shutdown">シャットダウン</option>
+        <option value="restart">再起動</option></select></label>
+        <p class="sub" style="color:var(--dim)">スマホ側では実行前に確認ダイアログが出ます。</p>`;
+      f.querySelector("#fPower").value = st.power;
+      f.querySelector("#fPower").onchange = (e) => st.power = e.target.value;
+    } else if (type === "macro") {
+      f.innerHTML = `<div id="fSteps"></div><button id="fAddStep" style="margin-top:8px">＋ ステップ追加</button>
+        <p class="sub" style="color:var(--dim);margin:6px 0 0">
+          shortcut: キーを + 区切り（例 win+r） / delay: ミリ秒待機</p>`;
+      const drawSteps = () => {
+        const el = f.querySelector("#fSteps");
+        el.innerHTML = "";
+        st.steps.forEach((step, i) => {
+          const row = document.createElement("div");
+          row.className = "step-row";
+          row.innerHTML = `<select>
+              <option value="shortcut">shortcut</option><option value="text">text</option>
+              <option value="launch">launch</option><option value="delay">delay</option>
+            </select><input type="text"><button class="danger">×</button>`;
+          const sel = row.querySelector("select"), inp = row.querySelector("input");
+          sel.value = step.type;
+          inp.value = step.type === "shortcut" ? (step.keys || []).join("+")
+                    : step.type === "delay" ? String(step.ms ?? 100)
+                    : step.type === "launch" ? (step.target || "") : (step.text || "");
+          const apply = () => {
+            const v = inp.value;
+            st.steps[i] =
+              sel.value === "shortcut" ? { type: "shortcut", keys: v.split(/[+\s]+/).filter(Boolean) }
+              : sel.value === "delay" ? { type: "delay", ms: parseInt(v, 10) || 100 }
+              : sel.value === "launch" ? { type: "launch", target: v }
+              : { type: "text", text: v };
+          };
+          sel.onchange = () => { apply(); drawSteps(); };
+          inp.oninput = apply;
+          row.querySelector("button").onclick = () => { st.steps.splice(i, 1); drawSteps(); };
+          el.appendChild(row);
+        });
+      };
+      drawSteps();
+      f.querySelector("#fAddStep").onclick = () => { st.steps.push(sc([])); drawSteps(); };
+    } else { // json
+      f.innerHTML = `<label class="fld">送信するJSON<textarea id="fJson" rows="8"></textarea></label>`;
+      f.querySelector("#fJson").value = st.json;
+      f.querySelector("#fJson").oninput = (e) => st.json = e.target.value;
+    }
+  };
+
+  drawPrev(); drawIcons(); drawPal(); drawTypes(); drawForm();
+
+  q("#eCancel").onclick = () => bg.remove();
+  q("#eOk").onclick = () => {
+    const label = q("#eLabel").value.trim();
+    if (!label) { toast("ラベルを入力してください"); return; }
+    let message;
+    if (type === "shortcut") {
+      const keys = [...MODS.filter(x => st.mods.has(x)), ...st.key.trim().toLowerCase().split(/\s+/).filter(Boolean)];
+      if (!keys.length) { toast("キーを入力してください"); return; }
+      message = { type: "shortcut", keys };
+    } else if (type === "launch") {
+      if (!st.target.trim()) { toast("起動対象を入力してください"); return; }
+      message = { type: "launch", target: st.target.trim() };
+    } else if (type === "text") {
+      if (!st.text) { toast("テキストを入力してください"); return; }
+      message = { type: "text", text: st.text };
+    } else if (type === "screenshot") {
+      message = { type: "screenshot" };
+    } else if (type === "power") {
+      message = { type: "power", action: st.power };
+    } else if (type === "macro") {
+      if (!st.steps.length) { toast("ステップを追加してください"); return; }
+      message = { type: "macro", steps: st.steps };
+    } else {
+      try {
+        message = JSON.parse(st.json);
+        if (typeof message !== "object" || Array.isArray(message) || typeof message.type !== "string")
+          throw new Error();
+      } catch { toast('"type" を含むJSONオブジェクトにしてください'); return; }
+    }
+    bg.remove();
+    onDone({ label, icon: b.icon, color: b.color >>> 0, message });
+  };
+}
+
+function modal(innerHtml) {
+  const bg = document.createElement("div");
+  bg.className = "modal-bg";
+  bg.innerHTML = `<div class="modal">${innerHtml}</div>`;
+  bg.addEventListener("mousedown", (e) => { if (e.target === bg) bg.remove(); });
+  document.body.appendChild(bg);
+  return bg;
+}
+
+// ─────────────────────────── 通信
+async function loadConfig() {
+  try {
+    const r = await fetch("/api/config");
+    if (r.status === 404) return false;
+    cfg = await r.json();
+    dirty = false;
+    $("saveBtn").disabled = true;
+    render();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function save() {
+  try {
+    const r = await fetch("/api/config", { method: "PUT", body: JSON.stringify(cfg) });
+    if (!r.ok) { toast("保存に失敗しました: " + await r.text()); return; }
+    const res = await r.json();
+    dirty = false;
+    $("saveBtn").disabled = true;
+    toast(res.pushed ? "保存してスマホに反映しました" : "保存しました（スマホ未接続。次回接続時に反映）");
+  } catch {
+    toast("保存に失敗しました（PocketPadTrayは起動していますか？）");
+  }
+}
+
+async function pollStatus() {
+  try {
+    const r = await fetch("/api/status");
+    const s = await r.json();
+    $("connDot").classList.toggle("on", s.connected);
+    $("connLabel").textContent = s.connected ? "スマホ接続中" : "スマホ未接続";
+  } catch {
+    $("connDot").classList.remove("on");
+    $("connLabel").textContent = "サーバー停止？";
+  }
+}
+
+// ─────────────────────────── 起動
+$("saveBtn").onclick = save;
+$("reloadBtn").onclick = async () => {
+  if (dirty && !confirm("未保存の変更があります。破棄して読み直しますか？")) return;
+  if (await loadConfig()) toast("読み直しました");
+};
+$("sens").addEventListener("input", (e) => {
+  cfg.sensitivity = Number(e.target.value);
+  $("sensVal").textContent = cfg.sensitivity.toFixed(1);
+  markDirty();
+});
+$("addPresetBtn").onclick = openPresetPicker;
+$("addNewBtn").onclick = () => openEditor(null, (nb) => { cfg.deck.push(nb); markDirty(); renderDeck(); });
+window.addEventListener("beforeunload", (e) => { if (dirty) e.preventDefault(); });
+
+// アイコンフォントを明示ロード。失敗（オフライン等）なら名前テキスト表示に切替。
+// fonts.ready+check方式だと「.mi要素が描画される前にreadyが解決→no-icons付与→
+// フォントを使う要素が無くなり永久にunloaded」の鶏卵になるため load() を使う。
+document.fonts.load('22px "Material Icons"')
+  .then(faces => { if (!faces.length) document.body.classList.add("no-icons"); })
+  .catch(() => document.body.classList.add("no-icons"));
+
+(async () => {
+  pollStatus();
+  setInterval(pollStatus, 5000);
+  // 初回同期前(404)はスマホ接続を待ってリトライ
+  while (!(await loadConfig())) await new Promise(res => setTimeout(res, 3000));
+})();
+</script>
+</body>
+</html>

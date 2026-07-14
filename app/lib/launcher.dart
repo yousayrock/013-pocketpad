@@ -114,6 +114,32 @@ class LauncherPanel extends StatelessWidget {
   final void Function(double dx, double dy) onMove;
   final void Function(double dy) onScroll;
 
+  /// 電源系（sleep/shutdown/restart）だけは誤タップが致命的なので確認を挟む。
+  Future<void> _handleTap(BuildContext context, DeckButton b) async {
+    if (b.message['type'] != 'power') {
+      onSend(b.message);
+      return;
+    }
+    const names = {'sleep': 'スリープ', 'shutdown': 'シャットダウン', 'restart': '再起動'};
+    final name = names[b.message['action']] ?? b.message['action'];
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('PCを$nameしますか？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('キャンセル')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('$nameする',
+                  style: const TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+    if (ok == true) onSend(b.message);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -152,7 +178,7 @@ class LauncherPanel extends StatelessWidget {
               itemCount: buttons.length,
               itemBuilder: (context, i) {
                 final b = buttons[i];
-                return _DeckTile(button: b, onTap: () => onSend(b.message));
+                return _DeckTile(button: b, onTap: () => _handleTap(context, b));
               },
             ),
           );
