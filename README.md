@@ -98,8 +98,8 @@ cd 013-pocketpad
 ```bash
 cd pc/PocketPadTray
 dotnet run                      # そのまま起動
-# 配布用の単一EXE（.NET不要版）を作る場合：
-dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true
+# 配布用の単一EXE（.NET不要版）を作る場合（圧縮なしだと約172MBになるので注意）：
+dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
 ```
 
 **スマホ側（要 Flutter SDK）**
