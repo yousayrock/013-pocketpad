@@ -6,12 +6,13 @@ namespace PocketPadTray;
 static class Program
 {
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
         var server = new WsServer(port: 9013);
         server.Start();
-        Application.Run(new TrayContext(server));
+        // --qr: 起動と同時に接続QRを表示（ショートカット用）
+        Application.Run(new TrayContext(server, showQr: args.Contains("--qr")));
     }
 }
 
@@ -25,7 +26,7 @@ class TrayContext : ApplicationContext
 
     private QrForm? _qrForm;
 
-    public TrayContext(WsServer server)
+    public TrayContext(WsServer server, bool showQr = false)
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("接続QRを表示", null, (_, _) => ShowQr(server));
@@ -58,6 +59,7 @@ class TrayContext : ApplicationContext
         _icon.BalloonTipTitle = "PocketPad 起動";
         _icon.BalloonTipText = "アイコンをクリックすると接続QRが表示されます";
         _icon.ShowBalloonTip(3000);
+        if (showQr) ShowQr(server);
     }
 
     private void ShowQr(WsServer server)
@@ -80,7 +82,7 @@ class TrayContext : ApplicationContext
         MessageBox.Show(
             $"接続先: ws://{string.Join(" または ", ips)}:{server.Port}/ws\n" +
             $"ペアリングトークン: {server.PairingToken}\n\n" +
-            "スマホアプリの接続画面にこのトークンを入力してください。\n（QRコード表示はPhase1後半で実装）",
+            "スマホアプリの接続画面にこのトークンを入力してください。",
             "PocketPad 接続情報",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
