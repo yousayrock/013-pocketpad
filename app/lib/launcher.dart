@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'trackpad.dart';
@@ -200,6 +202,33 @@ class _DeckTile extends StatefulWidget {
 
 class _DeckTileState extends State<_DeckTile> {
   bool _pressed = false;
+  Timer? _repeat;
+
+  /// 音量±だけは長押しで連射できるようにする（押しっぱなしで調節）
+  bool get _repeatable {
+    final m = widget.button.message;
+    if (m['type'] != 'shortcut') return false;
+    final keys = (m['keys'] as List?) ?? const [];
+    return keys.length == 1 && (keys.first == 'volup' || keys.first == 'voldown');
+  }
+
+  void _startRepeat() {
+    widget.onTap();
+    _repeat = Timer.periodic(
+        const Duration(milliseconds: 120), (_) => widget.onTap());
+  }
+
+  void _stopRepeat() {
+    _repeat?.cancel();
+    _repeat = null;
+    if (mounted) setState(() => _pressed = false);
+  }
+
+  @override
+  void dispose() {
+    _repeat?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -209,6 +238,9 @@ class _DeckTileState extends State<_DeckTile> {
       onTapUp: (_) => setState(() => _pressed = false),
       onTapCancel: () => setState(() => _pressed = false),
       onTap: widget.onTap,
+      onLongPressStart: _repeatable ? (_) => _startRepeat() : null,
+      onLongPressEnd: _repeatable ? (_) => _stopRepeat() : null,
+      onLongPressCancel: _repeatable ? _stopRepeat : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 80),
         decoration: BoxDecoration(

@@ -79,44 +79,62 @@ class _ConnectScreenState extends State<ConnectScreen> {
   }
 
   /// 前回PCへ、成功するまで数秒ごとに自動再接続を続ける。
-  /// QR/手動を触ると _autoRetry=false で止まる。
+  /// _busyは立てない（ボタンを殺すとループを止める手段がなくなる）。
+  /// QR/手動ボタンを押すと _autoRetry=false で止まる。
   Future<void> _autoConnect() async {
-    while (_autoRetry && mounted &&
-        _host.text.isNotEmpty && _token.text.isNotEmpty) {
-      setState(() {
-        _busy = true;
-        _status = '前回のPC（${_host.text}）に再接続中…';
-      });
+    while (_autoRetry &&
+        mounted &&
+        _host.text.isNotEmpty &&
+        _token.text.isNotEmpty) {
+      // 1行に収まる長さにする（IPを含めても途中で折り返させない）
+      setState(() => _status = '再接続中…（${_host.text}）');
       if (await _tryConnect(
-          _host.text, _token.text, const Duration(seconds: 3))) {
+        _host.text,
+        _token.text,
+        const Duration(seconds: 3),
+        auto: true,
+      )) {
         return; // 成功したらTrackpadScreenへ遷移済み
       }
       if (!mounted || !_autoRetry) return;
-      setState(() => _status = '接続待ち…（PCのアプリが起動しているか確認）');
+      setState(() => _status = '接続待ち…\n下のボタンでいつでも接続し直せます');
       await Future.delayed(const Duration(seconds: 2));
     }
   }
 
   /// 1ホストへの接続試行。成功したらTrackpadScreenへ遷移してtrueを返す。
-  Future<bool> _tryConnect(String host, String token, Duration timeout) async {
+  /// auto=trueの自動再接続は、ユーザーがQR/手動を選んだ後に成功しても遷移しない。
+  Future<bool> _tryConnect(
+    String host,
+    String token,
+    Duration timeout, {
+    bool auto = false,
+  }) async {
     try {
-      final channel =
-          WebSocketChannel.connect(Uri.parse('ws://$host:9013/ws'));
+      final channel = WebSocketChannel.connect(Uri.parse('ws://$host:9013/ws'));
       await channel.ready.timeout(timeout);
 
       final stream = channel.stream.asBroadcastStream();
-      channel.sink.add(jsonEncode({
-        'type': 'auth',
-        'token': token,
-        'device_id': 'a25',
-        'device_name': 'A25',
-      }));
+      channel.sink.add(
+        jsonEncode({
+          'type': 'auth',
+          'token': token,
+          'device_id': 'a25',
+          'device_name': 'A25',
+        }),
+      );
 
-      final reply =
-          await stream.firstWhere((m) => m is String).timeout(timeout);
+      final reply = await stream
+          .firstWhere((m) => m is String)
+          .timeout(timeout);
       final json = jsonDecode(reply as String) as Map<String, dynamic>;
 
       if (json['type'] != 'auth_ok') {
+        channel.sink.close();
+        return false;
+      }
+      if (auto && !_autoRetry) {
+        // 接続試行中にユーザーがQR/手動を選んだ。横取りせず破棄する
         channel.sink.close();
         return false;
       }
@@ -124,9 +142,11 @@ class _ConnectScreenState extends State<ConnectScreen> {
       await p.setString('host', host);
       await p.setString('token', token);
       if (!mounted) return true;
-      Navigator.of(context).pushReplacement(MaterialPageRoute(
-        builder: (_) => TrackpadScreen(channel: channel, stream: stream),
-      ));
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => TrackpadScreen(channel: channel, stream: stream),
+        ),
+      );
       return true;
     } catch (_) {
       return false;
@@ -147,9 +167,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
   /// PC画面のQRを読み取り、接続する。
   Future<void> _scanQr() async {
     _autoRetry = false; // QRを選んだので自動リトライは止める
-    final raw = await Navigator.of(context).push<String>(
-      MaterialPageRoute(builder: (_) => const ScanScreen()),
-    );
+    final raw = await Navigator.of(
+      context,
+    ).push<String>(MaterialPageRoute(builder: (_) => const ScanScreen()));
     if (raw == null || !mounted) return;
 
     // QRデータは "PP|IP|PORT|TOKEN"（データ量を絞って読みやすくした形式）
@@ -175,121 +195,153 @@ class _ConnectScreenState extends State<ConnectScreen> {
       _busy = false;
       _status = msg;
     });
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg), backgroundColor: kMagenta));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(msg), backgroundColor: kMagenta));
   }
 
   @override
   Widget build(BuildContext context) {
+    // 機種ごとの画面幅・縦横比の差に追従：幅400dpを基準にヒーロー部を拡縮し、
+    // タブレット等の広い画面ではコンテンツ幅を480dpで頭打ちにして間延びを防ぐ
+    final size = MediaQuery.sizeOf(context);
+    final s = (size.width / 400).clamp(0.75, 1.15).toDouble();
     return Scaffold(
       body: SafeArea(
         child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 96,
-                  height: 96,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border:
-                        Border.all(color: kAccent.withValues(alpha: 0.6), width: 2),
-                    boxShadow: [
-                      BoxShadow(
-                          color: kAccent.withValues(alpha: 0.25), blurRadius: 24),
-                    ],
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 96 * s,
+                    height: 96 * s,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(
+                        color: kAccent.withValues(alpha: 0.6),
+                        width: 2,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: kAccent.withValues(alpha: 0.25),
+                          blurRadius: 24,
+                        ),
+                      ],
+                    ),
+                    child: Icon(Icons.touch_app, size: 44 * s, color: kAccent),
                   ),
-                  child: const Icon(Icons.touch_app, size: 44, color: kAccent),
-                ),
-                const SizedBox(height: 24),
-                const Text('PocketPad',
-                    style: TextStyle(
-                        fontSize: 40,
+                  SizedBox(height: 24 * s),
+                  // letterSpacingは最終文字の後ろにも付くので、左paddingで相殺して中央に見せる
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Text(
+                      'PocketPad',
+                      style: TextStyle(
+                        fontSize: 40 * s,
                         fontWeight: FontWeight.bold,
                         color: kAccent,
-                        letterSpacing: 6)),
-                const SizedBox(height: 4),
-                const Text('Your PC. In Your Pocket. — 未来ガジェット013号',
-                    style: TextStyle(color: Colors.white54, fontSize: 12)),
-                const SizedBox(height: 32),
-                if (_status.isNotEmpty) ...[
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      if (_busy)
-                        const Padding(
-                          padding: EdgeInsets.only(right: 10),
-                          child: SizedBox(
-                              width: 14,
-                              height: 14,
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2)),
-                        ),
-                      Flexible(
-                        child: Text(_status,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(color: Colors.white70)),
+                        letterSpacing: 6,
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-                ],
-                SizedBox(
-                  width: double.infinity,
-                  height: 64,
-                  child: FilledButton.icon(
-                    onPressed: _busy ? null : _scanQr,
-                    icon: const Icon(Icons.qr_code_scanner, size: 28),
-                    label: const Text('QRコードで接続',
-                        style: TextStyle(
-                            fontSize: 18, fontWeight: FontWeight.bold)),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextButton(
-                  onPressed: _busy
-                      ? null
-                      : () => setState(() => _showManual = !_showManual),
-                  child: Text(_showManual ? '手動入力を閉じる' : '手動で入力する',
-                      style: const TextStyle(color: Colors.white54)),
-                ),
-                if (_showManual) ...[
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _host,
-                    decoration: const InputDecoration(
-                      labelText: 'PCのIPアドレス（例: 192.168.1.10）',
-                      border: OutlineInputBorder(),
-                    ),
-                    keyboardType: TextInputType.url,
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: _token,
-                    decoration: const InputDecoration(
-                      labelText: 'ペアリングトークン',
-                      border: OutlineInputBorder(),
                     ),
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 6),
+                  // 狭い画面では1行に収まらないため、折り返し位置を固定して中央揃え
+                  const Text(
+                    'Your PC. In Your Pocket.\n未来ガジェット013号',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                      height: 1.6,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  // スピナーは文の横に置くと折り返し時に左端へ浮くので、上に重ねて中央揃え
+                  if (_status.isNotEmpty) ...[
+                    if (_busy || _autoRetry)
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 12),
+                        child: SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                    Text(
+                      _status,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 20),
+                  ],
                   SizedBox(
                     width: double.infinity,
-                    height: 52,
-                    child: OutlinedButton(
-                      onPressed: _busy ? null : _connect,
-                      child: Text(_busy ? '接続中…' : 'この情報で接続',
-                          style: const TextStyle(fontSize: 16)),
+                    height: 64,
+                    child: FilledButton.icon(
+                      onPressed: _busy ? null : _scanQr,
+                      icon: const Icon(Icons.qr_code_scanner, size: 28),
+                      label: const Text(
+                        'QRコードで接続',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ),
                   ),
-                ],
-                const SizedBox(height: 40),
-                const Text(
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: _busy
+                        ? null
+                        : () => setState(() => _showManual = !_showManual),
+                    child: Text(
+                      _showManual ? '手動入力を閉じる' : '手動で入力する',
+                      style: const TextStyle(color: Colors.white54),
+                    ),
+                  ),
+                  if (_showManual) ...[
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _host,
+                      decoration: const InputDecoration(
+                        labelText: 'PCのIPアドレス（例: 192.168.1.10）',
+                        border: OutlineInputBorder(),
+                      ),
+                      keyboardType: TextInputType.url,
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: _token,
+                      decoration: const InputDecoration(
+                        labelText: 'ペアリングトークン',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: OutlinedButton(
+                        onPressed: _busy ? null : _connect,
+                        child: Text(
+                          _busy ? '接続中…' : 'この情報で接続',
+                          style: const TextStyle(fontSize: 16),
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 40),
+                  const Text(
                     'PC側はタスクトレイのPocketPadアイコンを\nクリックするとQRが表示されます',
                     textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.white38, fontSize: 12)),
-              ],
+                    style: TextStyle(color: Colors.white38, fontSize: 12),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -359,15 +411,14 @@ class _ScanScreenState extends State<ScanScreen> {
             alignment: Alignment.bottomCenter,
             child: Container(
               margin: const EdgeInsets.all(24),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
               decoration: BoxDecoration(
                 color: kBg.withValues(alpha: 0.85),
                 borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: kAccent.withValues(alpha: 0.3)),
               ),
               child: const Text(
-                'PCのタスクトレイアイコンをクリックして\n表示されたQRコードを枠に合わせてください',
+                'PCのトレイアイコンをクリック\nQRコードを枠に合わせてください',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white),
               ),
@@ -382,7 +433,11 @@ class _ScanScreenState extends State<ScanScreen> {
 // ─────────────────────────────────────── トラックパッド画面
 
 class TrackpadScreen extends StatefulWidget {
-  const TrackpadScreen({super.key, required this.channel, required this.stream});
+  const TrackpadScreen({
+    super.key,
+    required this.channel,
+    required this.stream,
+  });
 
   final WebSocketChannel channel;
   final Stream<dynamic> stream;
@@ -421,12 +476,18 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       setState(() => _settings = s);
     });
     // 8ms間引き集約（protocol.md v1）
-    _flush = Timer.periodic(const Duration(milliseconds: 8), (_) => _flushMove());
+    _flush = Timer.periodic(
+      const Duration(milliseconds: 8),
+      (_) => _flushMove(),
+    );
     _ping = Timer.periodic(const Duration(seconds: 5), (_) {
       _sendJson({'type': 'ping', 'ts': DateTime.now().millisecondsSinceEpoch});
     });
-    _sub = widget.stream.listen(_onMessage,
-        onDone: _disconnected, onError: (_) => _disconnected());
+    _sub = widget.stream.listen(
+      _onMessage,
+      onDone: _disconnected,
+      onError: (_) => _disconnected(),
+    );
     // 設定同期はスマホ主導（listen登録後に送るので応答を取りこぼさない）。
     // PCに保存があれば config、なければ config_request が返る。
     _sendJson({'type': 'config_get'});
@@ -443,16 +504,21 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     }
     if (j['type'] == 'screenshot_result' && mounted) {
       final bytes = base64Decode(j['jpeg'] as String);
-      Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => ScreenshotPreview(bytes: bytes),
-      ));
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => ScreenshotPreview(bytes: bytes)),
+      );
     } else if (j['type'] == 'screenshot_error' && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('スクショの取得に失敗しました'), backgroundColor: kMagenta));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('スクショの取得に失敗しました'),
+          backgroundColor: kMagenta,
+        ),
+      );
     } else if (j['type'] == 'config' && j['settings'] is Map) {
       // PC保存の設定を適用+永続化（config_setは送り返さない=ループ防止）
       final s = AppSettings.fromJson(
-          (j['settings'] as Map).cast<String, dynamic>());
+        (j['settings'] as Map).cast<String, dynamic>(),
+      );
       _remoteConfigApplied = true;
       s.onSaved = _pushConfig;
       s.save(notify: false);
@@ -476,8 +542,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
 
   void _disconnected() {
     if (!mounted) return;
-    Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const ConnectScreen()));
+    Navigator.of(
+      context,
+    ).pushReplacement(MaterialPageRoute(builder: (_) => const ConnectScreen()));
   }
 
   void _flushMove() {
@@ -530,122 +597,139 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     return Scaffold(
       body: SafeArea(
         child: Column(
-        children: [
-          // ページ本体（表示設定に応じてトラックパッド / マクロ / YouTube）
-          Expanded(child: _buildPage(pages[tab])),
-          // テキスト入力（どの画面でもキーボードトグルで表示）
-          if (_showKeyboard)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: TextField(
-                controller: _text,
-                focusNode: _textFocus,
-                autofocus: true,
-                textInputAction: TextInputAction.send,
-                decoration: InputDecoration(
-                  labelText: 'Enterで送信。空欄でのバックスペースはPCに効く',
-                  border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.send, color: kAccent),
-                    onPressed: _sendText,
-                  ),
-                ),
-                onChanged: (v) {
-                  // 番兵が消えた＝空欄でバックスペース → PCのカーソル位置の文字を消す
-                  if (!v.contains(_zwsp)) {
-                    _shortcut(['backspace']);
-                    _text.value = TextEditingValue(
-                      text: _zwsp + v,
-                      selection: const TextSelection.collapsed(offset: 1),
-                    );
-                  }
-                },
-                onSubmitted: (_) {
-                  _sendText();
-                  _sendJson({'type': 'key', 'vk': 0x0D, 'action': 'tap', 'modifiers': <String>[]});
-                  _textFocus.requestFocus(); // キーボードを閉じず連続入力
-                },
-              ),
-            ),
-          // ページ切替バー（帯全体・高さ44で受ける。操作ボタン行とは別の行なので
-          // タップ判定の競合は起きない）。左半分タップ=前ページ、右半分=次ページ、
-          // 横スワイプでも切替できる。右端は設定への歯車（常設。下部ボタン行は
-          // 非表示にできるため、消えない場所に置く）。
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onHorizontalDragEnd: (d) {
-              final v = d.primaryVelocity ?? 0;
-              if (v < -50 && tab < pages.length - 1) setState(() => _tab = tab + 1);
-              if (v > 50 && tab > 0) setState(() => _tab = tab - 1);
-            },
-            child: SizedBox(
-              height: 44,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () {
-                        if (tab > 0) setState(() => _tab = tab - 1);
-                      },
-                      child: Icon(Icons.chevron_left,
-                          size: 28,
-                          color: tab > 0 ? kAccent : Colors.white12),
+          children: [
+            // ページ本体（表示設定に応じてトラックパッド / マクロ / YouTube）
+            Expanded(child: _buildPage(pages[tab])),
+            // テキスト入力（どの画面でもキーボードトグルで表示）
+            if (_showKeyboard)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: TextField(
+                  controller: _text,
+                  focusNode: _textFocus,
+                  autofocus: true,
+                  textInputAction: TextInputAction.send,
+                  decoration: InputDecoration(
+                    labelText: 'Enterで送信。空欄でのバックスペースはPCに効く',
+                    border: const OutlineInputBorder(),
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.send, color: kAccent),
+                      onPressed: _sendText,
                     ),
                   ),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: List.generate(
-                      pages.length,
-                      (i) => AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        width: tab == i ? 22 : 10,
-                        height: 10,
-                        margin: const EdgeInsets.symmetric(horizontal: 4),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(5),
-                          color: tab == i ? kAccent : Colors.white24,
+                  onChanged: (v) {
+                    // 番兵が消えた＝空欄でバックスペース → PCのカーソル位置の文字を消す
+                    if (!v.contains(_zwsp)) {
+                      _shortcut(['backspace']);
+                      _text.value = TextEditingValue(
+                        text: _zwsp + v,
+                        selection: const TextSelection.collapsed(offset: 1),
+                      );
+                    }
+                  },
+                  onSubmitted: (_) {
+                    _sendText();
+                    _sendJson({
+                      'type': 'key',
+                      'vk': 0x0D,
+                      'action': 'tap',
+                      'modifiers': <String>[],
+                    });
+                    _textFocus.requestFocus(); // キーボードを閉じず連続入力
+                  },
+                ),
+              ),
+            // ページ切替バー（帯全体・高さ44で受ける。操作ボタン行とは別の行なので
+            // タップ判定の競合は起きない）。左半分タップ=前ページ、右半分=次ページ、
+            // 横スワイプでも切替できる。右端は設定への歯車（常設。下部ボタン行は
+            // 非表示にできるため、消えない場所に置く）。
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onHorizontalDragEnd: (d) {
+                final v = d.primaryVelocity ?? 0;
+                if (v < -50 && tab < pages.length - 1) {
+                  setState(() => _tab = tab + 1);
+                }
+                if (v > 50 && tab > 0) setState(() => _tab = tab - 1);
+              },
+              child: SizedBox(
+                height: 44,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          if (tab > 0) setState(() => _tab = tab - 1);
+                        },
+                        child: Icon(
+                          Icons.chevron_left,
+                          size: 28,
+                          color: tab > 0 ? kAccent : Colors.white12,
                         ),
                       ),
                     ),
-                  ),
-                  Expanded(
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: () {
-                        if (tab < pages.length - 1) setState(() => _tab = tab + 1);
-                      },
-                      child: Icon(Icons.chevron_right,
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: List.generate(
+                        pages.length,
+                        (i) => AnimatedContainer(
+                          duration: const Duration(milliseconds: 150),
+                          width: tab == i ? 22 : 10,
+                          height: 10,
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(5),
+                            color: tab == i ? kAccent : Colors.white24,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          if (tab < pages.length - 1) {
+                            setState(() => _tab = tab + 1);
+                          }
+                        },
+                        child: Icon(
+                          Icons.chevron_right,
                           size: 28,
-                          color:
-                              tab < pages.length - 1 ? kAccent : Colors.white12),
+                          color: tab < pages.length - 1
+                              ? kAccent
+                              : Colors.white12,
+                        ),
+                      ),
                     ),
-                  ),
-                  SizedBox(
-                    width: 44,
-                    child: IconButton(
-                      icon: const Icon(Icons.settings,
-                          size: 22, color: Colors.white38),
-                      onPressed: _openSettings,
+                    SizedBox(
+                      width: 44,
+                      child: IconButton(
+                        icon: const Icon(
+                          Icons.settings,
+                          size: 22,
+                          color: Colors.white38,
+                        ),
+                        onPressed: _openSettings,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
-          ),
-          if (_settings.enabledBottomButtons.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Row(
-                children: [
-                  for (final id in _settings.enabledBottomButtons)
-                    _bottomBtnById(id),
-                ],
+            if (_settings.enabledBottomButtons.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(
+                  children: [
+                    for (final id in _settings.enabledBottomButtons)
+                      _bottomBtnById(id),
+                  ],
+                ),
               ),
-            ),
-          const SizedBox(height: 8),
-        ],
-      ),
+            const SizedBox(height: 8),
+          ],
+        ),
       ),
     );
   }
@@ -670,8 +754,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
         return TrackpadArea(
           onMove: _move,
           onScroll: (dy) => _scroll += dy,
-          onClick: (button, action) => _sendJson(
-              {'type': 'click', 'button': button, 'action': action}),
+          onClick: (button, action) =>
+              _sendJson({'type': 'click', 'button': button, 'action': action}),
           bottomMargin: 8,
           child: const Center(
             child: Text(
@@ -692,8 +776,10 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       case 'backspace':
         return _backspaceBtn();
       case 'keyboard':
-        return _iconBtn(_showKeyboard ? Icons.keyboard_hide : Icons.keyboard,
-            () => setState(() => _showKeyboard = !_showKeyboard));
+        return _iconBtn(
+          _showKeyboard ? Icons.keyboard_hide : Icons.keyboard,
+          () => setState(() => _showKeyboard = !_showKeyboard),
+        );
       case 'alttab':
         return _iconBtn(Icons.swap_horiz, () => _shortcut(['alt', 'tab']));
       case 'win':
@@ -704,8 +790,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   }
 
   Future<void> _openSettings() async {
-    await Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => SettingsScreen(settings: _settings)));
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => SettingsScreen(settings: _settings)),
+    );
     if (!mounted) return;
     // 設定画面でページ構成が変わった可能性があるので反映＋タブを範囲内に収める
     setState(() {
@@ -726,15 +813,18 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
             onLongPress: () {
               _shortcut(['backspace']);
               _bsRepeat?.cancel();
-              _bsRepeat = Timer.periodic(const Duration(milliseconds: 90),
-                  (_) => _shortcut(['backspace']));
+              _bsRepeat = Timer.periodic(
+                const Duration(milliseconds: 90),
+                (_) => _shortcut(['backspace']),
+              );
             },
             style: OutlinedButton.styleFrom(
               foregroundColor: kAccent,
               side: BorderSide(color: kAccent.withValues(alpha: 0.4)),
               padding: const EdgeInsets.symmetric(vertical: 14),
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
             child: const Icon(Icons.backspace_outlined, size: 22),
           ),
@@ -755,7 +845,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
             side: BorderSide(color: kAccent.withValues(alpha: 0.4)),
             padding: const EdgeInsets.symmetric(vertical: 14),
             shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12)),
+              borderRadius: BorderRadius.circular(12),
+            ),
           ),
           child: Icon(icon, size: 22),
         ),
@@ -788,8 +879,7 @@ class ScreenshotPreview extends StatelessWidget {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: kBg,
-        title: const Text('PCのスクリーンショット',
-            style: TextStyle(color: kAccent)),
+        title: const Text('PCのスクリーンショット', style: TextStyle(color: kAccent)),
       ),
       body: Center(
         child: InteractiveViewer(
@@ -804,7 +894,10 @@ class ScreenshotPreview extends StatelessWidget {
           child: Text(
             'ピンチでズーム。長押しで保存、または標準フォトアプリで切り抜けます',
             textAlign: TextAlign.center,
-            style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontSize: 12),
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.5),
+              fontSize: 12,
+            ),
           ),
         ),
       ),
