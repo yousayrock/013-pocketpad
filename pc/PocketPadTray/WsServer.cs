@@ -42,12 +42,18 @@ class WsServer
     private WebApplication? _app;
 
     /// <summary>認証済みのスマホ接続（1台想定）。ダッシュボードからの設定プッシュに使う。</summary>
-    private volatile WebSocket? _client;
+    private volatile Conn? _client;
 
-    /// <summary>同一ソケットへの並行SendAsync防止（受信ループ応答とダッシュボード起点のプッシュ）。</summary>
-    private readonly SemaphoreSlim _sendLock = new(1, 1);
+    /// <summary>1接続分の状態。送信ロックはソケット単位に持つ。全接続で共有すると、
+    /// 死んだ接続への送信詰まりがロックを握ったまま、再接続してきた新しいソケットへの
+    /// auth_ok送信まで道連れにしてしまう（トレイ再起動まで復旧不能になる）。</summary>
+    private sealed class Conn(WebSocket ws)
+    {
+        public WebSocket Ws { get; } = ws;
+        public SemaphoreSlim SendLock { get; } = new(1, 1);
+    }
 
-    public bool ClientConnected => _client is { State: WebSocketState.Open };
+    public bool ClientConnected => _client is { Ws.State: WebSocketState.Open };
 
     public WsServer(int port) => Port = port;
 
@@ -144,11 +150,11 @@ class WsServer
     /// <summary>接続中のスマホへ設定をプッシュ。未接続・送信失敗は false。</summary>
     public async Task<bool> PushConfigAsync(string settingsJson)
     {
-        var ws = _client;
-        if (ws is not { State: WebSocketState.Open }) return false;
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
         try
         {
-            await SendTextAsync(ws, "{\"type\":\"config\",\"settings\":" + settingsJson + "}");
+            await SendTextAsync(conn, "{\"type\":\"config\",\"settings\":" + settingsJson + "}");
             return true;
         }
         catch (Exception)
@@ -166,6 +172,7 @@ class WsServer
         }
 
         using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+        var conn = new Conn(ws);
         var authed = false;
         var buf = new byte[8192];
         var assembly = new MemoryStream(); // 分割フレームの組み立て用
@@ -191,18 +198,22 @@ class WsServer
                     continue;
                 }
 
-                authed = await HandleJsonAsync(ws, message, authed);
+                authed = await HandleJsonAsync(conn, message, authed);
             }
         }
         catch (WebSocketException)
         {
             // 切断は正常系として扱う（スマホのスリープ等）
         }
+        catch (OperationCanceledException)
+        {
+            // 送信タイムアウト（SendTextAsyncがAbort済み）。切断と同じ扱い
+        }
         finally
         {
             // この接続が「現在の認証済みクライアント」なら参照を外す。
             // 新しい接続に置き換わった後に旧接続が切れたケースでは消さない。
-            if (ReferenceEquals(_client, ws)) _client = null;
+            if (ReferenceEquals(_client, conn)) _client = null;
         }
     }
 
@@ -222,7 +233,7 @@ class WsServer
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PocketPad", "recv.log");
 
     /// <returns>処理後の認証状態</returns>
-    private async Task<bool> HandleJsonAsync(WebSocket ws, ReadOnlyMemory<byte> payload, bool authed)
+    private async Task<bool> HandleJsonAsync(Conn conn, ReadOnlyMemory<byte> payload, bool authed)
     {
         using var doc = JsonDocument.Parse(payload);
         var root = doc.RootElement;
@@ -245,7 +256,7 @@ class WsServer
 
         if (type == "ping")
         {
-            await SendJsonAsync(ws, new { type = "pong", ts = root.TryGetProperty("ts", out var ts) ? ts.GetInt64() : 0 });
+            await SendJsonAsync(conn, new { type = "pong", ts = root.TryGetProperty("ts", out var ts) ? ts.GetInt64() : 0 });
             return authed;
         }
 
@@ -254,12 +265,12 @@ class WsServer
             // Phase1簡易版：トークン一致で認証。PIN確認とdevice_secret永続化はPhase1後半で実装。
             if (root.TryGetProperty("token", out var t) && t.GetString() == PairingToken)
             {
-                await SendJsonAsync(ws, new { type = "auth_ok", device_secret = RandomNumberGenerator.GetHexString(64, lowercase: true) });
-                _client = ws; // 設定プッシュ用に保持（1台想定、新しい接続が常に勝つ）
+                await SendJsonAsync(conn, new { type = "auth_ok", device_secret = RandomNumberGenerator.GetHexString(64, lowercase: true) });
+                _client = conn; // 設定プッシュ用に保持（1台想定、新しい接続が常に勝つ）
                 ClientAuthenticated?.Invoke();
                 return true;
             }
-            await SendJsonAsync(ws, new { type = "auth_ng", reason = "invalid_token" });
+            await SendJsonAsync(conn, new { type = "auth_ng", reason = "invalid_token" });
             return false;
         }
 
@@ -293,23 +304,36 @@ class WsServer
                 break;
 
             case "screenshot":
-                // 全画面をキャプチャしてスマホへ返す（スマホ側で表示・保存できる）
-                try
+                // 全画面をキャプチャしてスマホへ返す（スマホ側で表示・保存できる）。
+                // キャプチャ（~100ms）と数MBのbase64送信で受信ループを塞がないよう
+                // バックグラウンドで実行する（送信中もマウス移動が処理できるように）
+                _ = Task.Run(async () =>
                 {
-                    var jpeg = ScreenCapture.CaptureJpegBase64();
-                    await SendJsonAsync(ws, new { type = "screenshot_result", jpeg });
-                }
-                catch (Exception)
-                {
-                    await SendJsonAsync(ws, new { type = "screenshot_error" });
-                }
+                    try
+                    {
+                        var jpeg = ScreenCapture.CaptureJpegBase64();
+                        await SendJsonAsync(conn, new { type = "screenshot_result", jpeg });
+                    }
+                    catch (Exception)
+                    {
+                        try { await SendJsonAsync(conn, new { type = "screenshot_error" }); }
+                        catch (Exception) { /* 送信先ごと死んでいる場合は諦める */ }
+                    }
+                });
                 break;
 
             case "macro":
                 // steps: [{type:"shortcut",keys:[...]}, {type:"text",text:"..."}, {type:"delay",ms:200}, ...]
+                // delayステップの間も受信ループを塞がないようバックグラウンドで実行。
+                // docはこのメソッドを抜けるとDisposeされるためCloneが必須
                 if (root.TryGetProperty("steps", out var steps) && steps.ValueKind == JsonValueKind.Array)
                 {
-                    await RunMacroAsync(steps);
+                    var cloned = steps.Clone();
+                    _ = Task.Run(async () =>
+                    {
+                        try { await RunMacroAsync(cloned); }
+                        catch (Exception) { /* 不正なstepsでサーバーを落とさない */ }
+                    });
                 }
                 break;
 
@@ -318,11 +342,11 @@ class WsServer
                 var saved = SettingsStore.Load();
                 if (saved is not null)
                 {
-                    await SendTextAsync(ws, "{\"type\":\"config\",\"settings\":" + saved + "}");
+                    await SendTextAsync(conn, "{\"type\":\"config\",\"settings\":" + saved + "}");
                 }
                 else
                 {
-                    await SendJsonAsync(ws, new { type = "config_request" });
+                    await SendJsonAsync(conn, new { type = "config_request" });
                 }
                 break;
 
@@ -463,25 +487,42 @@ class WsServer
         _ => (ushort)0,
     };
 
-    private Task SendJsonAsync(WebSocket ws, object obj) =>
-        SendTextAsync(ws, JsonSerializer.Serialize(obj));
+    private static Task SendJsonAsync(Conn conn, object obj) =>
+        SendTextAsync(conn, JsonSerializer.Serialize(obj));
 
-    /// <summary>_sendLockで直列化して送信。受信ループの応答とダッシュボード起点の
-    /// configプッシュが同じソケットに並行して SendAsync しないようにする。</summary>
-    private async Task SendTextAsync(WebSocket ws, string json)
+    /// <summary>ソケット単位のSendLockで直列化して送信（受信ループの応答・スクショ・
+    /// ダッシュボード起点のconfigプッシュが並行して SendAsync しないように）。
+    /// 15秒で完了しない送信は相手が死んでいるとみなしてAbortする。TCPが切断を
+    /// 確定するまで（数分）ロックを握って待ち続けると、その間すべての送信が詰まる。</summary>
+    private static async Task SendTextAsync(Conn conn, string json)
     {
-        await _sendLock.WaitAsync();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         try
         {
-            await ws.SendAsync(
+            await conn.SendLock.WaitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // ロック保持者（詰まった送信）が自分でAbortするはずだが、念のためこちらでも
+            conn.Ws.Abort();
+            throw;
+        }
+        try
+        {
+            await conn.Ws.SendAsync(
                 Encoding.UTF8.GetBytes(json),
                 WebSocketMessageType.Text,
                 endOfMessage: true,
-                CancellationToken.None);
+                cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            conn.Ws.Abort(); // 死んだ接続を確定させ、受信ループも即座に終わらせる
+            throw;
         }
         finally
         {
-            _sendLock.Release();
+            conn.SendLock.Release();
         }
     }
 }

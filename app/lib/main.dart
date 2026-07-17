@@ -452,8 +452,14 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   static final _zwsp = String.fromCharCode(0x200B);
 
   double _dx = 0, _dy = 0, _scroll = 0;
+  int _flushTick = 0;
   Timer? _flush;
   Timer? _ping;
+
+  /// 最後にpongを受信した時刻。12秒以上途絶えたら死に接続（Wi-Fi瞬断等）と
+  /// みなして接続画面へ戻す。TCPの切断検知（数分かかる）を待っている間は
+  /// 送信がキューに溜まり続け「だんだん重くなって固まる」ように見えるため。
+  int _lastPong = DateTime.now().millisecondsSinceEpoch;
   Timer? _bsRepeat;
   StreamSubscription? _sub;
   final _text = TextEditingController(text: _zwsp);
@@ -481,7 +487,12 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       (_) => _flushMove(),
     );
     _ping = Timer.periodic(const Duration(seconds: 5), (_) {
-      _sendJson({'type': 'ping', 'ts': DateTime.now().millisecondsSinceEpoch});
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - _lastPong > 12000) {
+        _disconnected(); // 死に接続を諦める。接続画面に戻れば自動再接続が走る
+        return;
+      }
+      _sendJson({'type': 'ping', 'ts': now});
     });
     _sub = widget.stream.listen(
       _onMessage,
@@ -502,7 +513,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     } catch (_) {
       return;
     }
-    if (j['type'] == 'screenshot_result' && mounted) {
+    if (j['type'] == 'pong') {
+      _lastPong = DateTime.now().millisecondsSinceEpoch;
+    } else if (j['type'] == 'screenshot_result' && mounted) {
       final bytes = base64Decode(j['jpeg'] as String);
       Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => ScreenshotPreview(bytes: bytes)),
@@ -548,12 +561,15 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   }
 
   void _flushMove() {
+    _flushTick++;
     if (_dx.abs() >= 1 || _dy.abs() >= 1) {
       _sendBinary(0x01, _dx.round(), _dy.round());
       _dx = 0;
       _dy = 0;
     }
-    if (_scroll.abs() >= 1) {
+    // スクロールは40ms（5tick）に1回へ間引く。8ms刻みだと毎秒最大125発の
+    // ホイールイベントになり、重いページではブラウザの処理が追いつかない
+    if (_flushTick % 5 == 0 && _scroll.abs() >= 1) {
       _sendBinary(0x02, _scroll.round(), 0);
       _scroll = 0;
     }
