@@ -100,6 +100,102 @@ const List<DeckButton> defaultDeck = [
   ),
 ];
 
+/// Claude Codeページのデフォルトコマンドデッキ。
+/// テキスト/スラッシュコマンド系はEnter送信までを1タップで済ませるため、
+/// PC側の`macro`（steps順次実行）で「入力→Enter」をまとめて送る。
+const List<DeckButton> defaultClaudeDeck = [
+  DeckButton(
+    label: 'Enter',
+    icon: Icons.keyboard_return,
+    color: _kAccent,
+    message: {'type': 'shortcut', 'keys': ['enter']},
+  ),
+  DeckButton(
+    label: 'Esc',
+    icon: Icons.cancel_outlined,
+    color: _kMagenta,
+    message: {'type': 'shortcut', 'keys': ['esc']},
+  ),
+  DeckButton(
+    label: 'Ctrl+C',
+    icon: Icons.stop_circle_outlined,
+    color: _kMagenta,
+    message: {'type': 'shortcut', 'keys': ['ctrl', 'c']},
+  ),
+  DeckButton(
+    label: '1 Yes',
+    icon: Icons.check,
+    color: _kAccent,
+    message: {
+      'type': 'macro',
+      'steps': [
+        {'type': 'text', 'text': '1'},
+        {'type': 'shortcut', 'keys': ['enter']},
+      ],
+    },
+  ),
+  DeckButton(
+    label: '2 常に許可',
+    icon: Icons.done_all,
+    color: _kAccent,
+    message: {
+      'type': 'macro',
+      'steps': [
+        {'type': 'text', 'text': '2'},
+        {'type': 'shortcut', 'keys': ['enter']},
+      ],
+    },
+  ),
+  DeckButton(
+    label: '3 No',
+    icon: Icons.close,
+    color: _kMagenta,
+    message: {
+      'type': 'macro',
+      'steps': [
+        {'type': 'text', 'text': '3'},
+        {'type': 'shortcut', 'keys': ['enter']},
+      ],
+    },
+  ),
+  DeckButton(
+    label: '/clear',
+    icon: Icons.layers_clear,
+    color: Colors.amberAccent,
+    message: {
+      'type': 'macro',
+      'steps': [
+        {'type': 'text', 'text': '/clear'},
+        {'type': 'shortcut', 'keys': ['enter']},
+      ],
+    },
+  ),
+  DeckButton(
+    label: '/compact',
+    icon: Icons.compress,
+    color: Colors.amberAccent,
+    message: {
+      'type': 'macro',
+      'steps': [
+        {'type': 'text', 'text': '/compact'},
+        {'type': 'shortcut', 'keys': ['enter']},
+      ],
+    },
+  ),
+  DeckButton(
+    label: '/resume',
+    icon: Icons.history,
+    color: Colors.amberAccent,
+    message: {
+      'type': 'macro',
+      'steps': [
+        {'type': 'text', 'text': '/resume'},
+        {'type': 'shortcut', 'keys': ['enter']},
+      ],
+    },
+  ),
+];
+
 /// ランチャーパネル本体。上半分はトラックパッド、下は3列×2段のマクロボタン。
 /// ボタンは縦スクロールで次の6個がぬるっと出てくる。
 class LauncherPanel extends StatelessWidget {

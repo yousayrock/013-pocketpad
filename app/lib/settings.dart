@@ -23,6 +23,16 @@ const Map<String, IconData> kIconCatalog = {
   'calculate': Icons.calculate,
   'public': Icons.public,
   'lock': Icons.lock,
+  // defaultClaudeDeckで使用中
+  'keyboard_return': Icons.keyboard_return,
+  'cancel_outlined': Icons.cancel_outlined,
+  'stop_circle_outlined': Icons.stop_circle_outlined,
+  'check': Icons.check,
+  'done_all': Icons.done_all,
+  'close': Icons.close,
+  'layers_clear': Icons.layers_clear,
+  'compress': Icons.compress,
+  'history': Icons.history,
   // 汎用
   'redo': Icons.redo,
   'save': Icons.save,
@@ -100,12 +110,14 @@ const kPageNames = {
   'trackpad': 'トラックパッド',
   'macro': 'マクロ',
   'youtube': 'YouTube',
+  'claude': 'Claude Code',
 };
 
 const kPageIcons = {
   'trackpad': Icons.touch_app,
   'macro': Icons.grid_view,
   'youtube': Icons.play_circle_outline,
+  'claude': Icons.smart_toy,
 };
 
 const kBottomButtonNames = {
@@ -114,6 +126,7 @@ const kBottomButtonNames = {
   'keyboard': 'キーボード表示',
   'alttab': 'タスク切替（Alt+Tab）',
   'win': 'Winキー',
+  'mic': 'マイク入力',
 };
 
 const kBottomButtonIcons = {
@@ -121,6 +134,7 @@ const kBottomButtonIcons = {
   'backspace': Icons.backspace_outlined,
   'keyboard': Icons.keyboard,
   'alttab': Icons.swap_horiz,
+  'mic': Icons.mic,
   'win': Icons.window,
 };
 
@@ -165,6 +179,7 @@ class AppSettings {
     required this.bottomButtons,
     required this.sensitivity,
     required this.deck,
+    required this.claudeDeck,
   });
 
   /// 全ページ（順序付き。非表示でも順序を保持する）
@@ -178,6 +193,9 @@ class AppSettings {
 
   /// マクロページのボタン
   List<DeckButton> deck;
+
+  /// Claude Codeページのコマンドボタン
+  List<DeckButton> claudeDeck;
 
   /// 保存時に呼ばれるフック（PCへのconfig_set送信用）。シリアライズ対象外。
   void Function(Map<String, dynamic> json)? onSaved;
@@ -193,6 +211,7 @@ class AppSettings {
         ],
         sensitivity: 1.4,
         deck: List.of(defaultDeck),
+        claudeDeck: List.of(defaultClaudeDeck),
       );
 
   /// 表示するページID（enabledのみ、順序どおり）。必ず1件以上になる。
@@ -209,6 +228,7 @@ class AppSettings {
         'bottomButtons': [for (final b in bottomButtons) b.toJson()],
         'sensitivity': sensitivity,
         'deck': [for (final b in deck) deckButtonToJson(b)],
+        'claudeDeck': [for (final b in claudeDeck) deckButtonToJson(b)],
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) {
@@ -220,6 +240,12 @@ class AppSettings {
     if (j['deck'] is List) {
       s.deck = [
         for (final e in j['deck'] as List)
+          if (e is Map) deckButtonFromJson(e.cast<String, dynamic>()),
+      ];
+    }
+    if (j['claudeDeck'] is List) {
+      s.claudeDeck = [
+        for (final e in j['claudeDeck'] as List)
           if (e is Map) deckButtonFromJson(e.cast<String, dynamic>()),
       ];
     }

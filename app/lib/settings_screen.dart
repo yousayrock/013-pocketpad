@@ -88,7 +88,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
             trailing: const Icon(Icons.chevron_right, color: Colors.white38),
             onTap: () async {
               await Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => DeckEditorScreen(settings: s)));
+                  builder: (_) => DeckEditorScreen(
+                        deck: s.deck,
+                        title: 'マクロボタン',
+                        onChanged: s.save,
+                      )));
+              setState(() {});
+            },
+          ),
+          _header('Claude Code'),
+          ListTile(
+            leading: const Icon(Icons.smart_toy, color: _kAccent),
+            title: const Text('Claude Codeコマンドを編集'),
+            subtitle: Text('${s.claudeDeck.length}個のボタン',
+                style: const TextStyle(color: Colors.white38)),
+            trailing: const Icon(Icons.chevron_right, color: Colors.white38),
+            onTap: () async {
+              await Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => DeckEditorScreen(
+                        deck: s.claudeDeck,
+                        title: 'Claude Codeコマンド',
+                        onChanged: s.save,
+                      )));
               setState(() {});
             },
           ),

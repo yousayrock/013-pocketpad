@@ -102,6 +102,13 @@ dotnet run                      # そのまま起動
 dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
 ```
 
+> ⚠️ PocketPadTrayは常時管理者権限で起動します（app.manifest）。タスクマネージャー等の
+> 管理者権限ウィンドウはUIPIにより非管理者プロセスからの`SendInput`を拒否するため。
+> 手動起動時は毎回UAC確認が出ます。「Windows起動時に自動起動」はタスクスケジューラの
+> 「最上位の特権で実行」で登録するためログオン時はプロンプトなしで昇格します。
+> なお、UAC確認画面やロック画面（Win+L）自体はセキュアデスクトップ上で動くため、
+> 管理者権限があっても原理的に操作できません。
+
 **スマホ側（要 Flutter SDK）**
 
 ```bash

@@ -7,21 +7,32 @@ import 'settings.dart';
 
 const _kAccent = Color(0xFF00F5FF);
 
-/// マクロボタンの一覧編集画面（並び替え・追加・削除・タップで個別編集）。
+/// ボタンデッキの一覧編集画面（並び替え・追加・削除・タップで個別編集）。
+/// マクロページ（AppSettings.deck）とClaude Codeページ（AppSettings.claudeDeck）
+/// で共用する。
 class DeckEditorScreen extends StatefulWidget {
-  const DeckEditorScreen({super.key, required this.settings});
+  const DeckEditorScreen({
+    super.key,
+    required this.deck,
+    required this.title,
+    required this.onChanged,
+  });
 
-  final AppSettings settings;
+  final List<DeckButton> deck;
+  final String title;
+
+  /// 変更（追加・編集・削除・並び替え）のたびに呼ばれる。呼び出し側で保存する。
+  final VoidCallback onChanged;
 
   @override
   State<DeckEditorScreen> createState() => _DeckEditorScreenState();
 }
 
 class _DeckEditorScreenState extends State<DeckEditorScreen> {
-  List<DeckButton> get deck => widget.settings.deck;
+  List<DeckButton> get deck => widget.deck;
 
   void _save() {
-    widget.settings.save();
+    widget.onChanged();
     setState(() {});
   }
 
@@ -45,7 +56,7 @@ class _DeckEditorScreenState extends State<DeckEditorScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('マクロボタン')),
+      appBar: AppBar(title: Text(widget.title)),
       floatingActionButton: FloatingActionButton(
         backgroundColor: _kAccent,
         foregroundColor: Colors.black,

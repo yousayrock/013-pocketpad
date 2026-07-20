@@ -62,9 +62,17 @@ static class SettingsStore
         { error = "missing sensitivity"; return false; }
         if (!IsToggleArray(s, "pages", out error)) return false;
         if (!IsToggleArray(s, "bottomButtons", out error)) return false;
+        if (!IsDeckArray(s, "deck", out error)) return false;
+        if (!IsDeckArray(s, "claudeDeck", out error)) return false;
+        return true;
+    }
 
-        if (!s.TryGetProperty("deck", out var deck) || deck.ValueKind != JsonValueKind.Array)
-        { error = "missing deck"; return false; }
+    /// <summary>デッキ配列（マクロページ用deck / Claude Codeページ用claudeDeck共通）の検証。</summary>
+    static bool IsDeckArray(JsonElement s, string name, out string error)
+    {
+        error = "";
+        if (!s.TryGetProperty(name, out var deck) || deck.ValueKind != JsonValueKind.Array)
+        { error = $"missing {name}"; return false; }
         foreach (var b in deck.EnumerateArray())
         {
             if (b.ValueKind != JsonValueKind.Object
@@ -73,7 +81,7 @@ static class SettingsStore
                 || !b.TryGetProperty("color", out var color) || color.ValueKind != JsonValueKind.Number
                 || !b.TryGetProperty("message", out var msg) || msg.ValueKind != JsonValueKind.Object
                 || !msg.TryGetProperty("type", out var mt) || mt.ValueKind != JsonValueKind.String)
-            { error = "invalid deck entry"; return false; }
+            { error = $"invalid {name} entry"; return false; }
         }
         return true;
     }

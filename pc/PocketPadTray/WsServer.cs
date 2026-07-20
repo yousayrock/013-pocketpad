@@ -122,6 +122,31 @@ class WsServer
             ctx.Response.ContentType = "application/json";
             await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { connected = ClientConnected }));
         });
+
+        // Claude Codeフック（Stop/Notification）からのローカル通知中継。
+        // localhost限定・フック側のPowerShellスクリプトからfire-and-forgetで叩かれる。
+        app.MapPost("/api/claude-notify", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            using var ms = new MemoryStream();
+            await ctx.Request.Body.CopyToAsync(ms);
+            if (ms.Length > 64 * 1024) { ctx.Response.StatusCode = 413; return; }
+            try
+            {
+                using var doc = JsonDocument.Parse(ms.ToArray());
+                var root = doc.RootElement;
+                var ev = root.TryGetProperty("event", out var evProp) ? evProp.GetString() ?? "" : "";
+                var message = root.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
+                var pushed = await PushClaudeNotifyAsync(ev, message);
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
+            }
+            catch (JsonException)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsync("invalid json");
+            }
+        });
     }
 
     /// <summary>ダッシュボード/APIはlocalhostからのみ。LAN内の他端末には見せない。</summary>
@@ -155,6 +180,22 @@ class WsServer
         try
         {
             await SendTextAsync(conn, "{\"type\":\"config\",\"settings\":" + settingsJson + "}");
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>接続中のスマホへClaude Code通知をプッシュ。未接続・送信失敗は false。</summary>
+    public async Task<bool> PushClaudeNotifyAsync(string ev, string message)
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            await SendJsonAsync(conn, new { type = "claude_notify", @event = ev, message });
             return true;
         }
         catch (Exception)
