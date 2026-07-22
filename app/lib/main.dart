@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'ai_office.dart';
 import 'claude_notify_service.dart';
 import 'launcher.dart';
 import 'settings.dart';
@@ -480,6 +481,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   bool _remoteConfigApplied = false;
 
   bool _claudeNotifyEnabled = true;
+  ClaudeActivity? _lastClaudeActivity;
+  ClaudeNotifyEvent? _lastClaudeNotifyEvent;
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
   bool _micListening = false;
@@ -569,9 +572,11 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       // Claude Codeページ（コントローラーUI）は廃止したが、Claude Code純正の
       // Remote Controlを使わずスマホを見ていない時に気づけるよう、通知アラート
       // （音+バイブ+フラッシュ／バックグラウンド時はシステム通知）だけは残す。
+      final event = (j['event'] as String?) ?? '';
+      final message = (j['message'] as String?) ?? '';
+      // 「AI社員」ページのアバターにも反映（通知トグルOFFでもページ上の状態は更新する）
+      setState(() => _lastClaudeNotifyEvent = ClaudeNotifyEvent(event: event, message: message));
       if (_claudeNotifyEnabled) {
-        final event = (j['event'] as String?) ?? '';
-        final message = (j['message'] as String?) ?? '';
         final foreground =
             WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
         if (foreground) {
@@ -581,6 +586,10 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
           showClaudeAlert(event, message);
         }
       }
+    } else if (j['type'] == 'claude_activity') {
+      final tool = (j['tool'] as String?) ?? '';
+      final detail = (j['detail'] as String?) ?? '';
+      setState(() => _lastClaudeActivity = ClaudeActivity(tool: tool, detail: detail));
     }
   }
 
@@ -841,6 +850,16 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   /// ページIDから本体ウィジェットを生成。
   Widget _buildPage(String id) {
     switch (id) {
+      case 'office':
+        return AiOfficePanel(
+          latestActivity: _lastClaudeActivity,
+          latestNotify: _lastClaudeNotifyEvent,
+          onMove: _move,
+          onScroll: _onScrollDelta,
+          onClick: (button, action) =>
+              _sendJson({'type': 'click', 'button': button, 'action': action}),
+          onShortcut: _shortcut,
+        );
       case 'youtube':
         return YoutubePanel(
           onSend: _sendJson,

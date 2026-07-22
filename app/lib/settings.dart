@@ -110,12 +110,14 @@ const kPageNames = {
   'trackpad': 'トラックパッド',
   'macro': 'マクロ',
   'youtube': 'YouTube',
+  'office': 'AI社員',
 };
 
 const kPageIcons = {
   'trackpad': Icons.touch_app,
   'macro': Icons.grid_view,
   'youtube': Icons.play_circle_outline,
+  'office': Icons.support_agent,
 };
 
 const kBottomButtonNames = {

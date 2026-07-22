@@ -147,6 +147,60 @@ class WsServer
                 await ctx.Response.WriteAsync("invalid json");
             }
         });
+
+        // Claude Codeフック（PreToolUse、httpタイプ）からのツール活動中継。
+        // 「AI社員」ページのアバターにツール単位の粒度で反応させるための経路。
+        // PowerShellスクリプト+stdin経由（claude-notifyと同方式）だと、この環境の
+        // PowerShellではPreToolUseフックのstdinが空になる問題があったため、
+        // Claude Code純正のhttpフック（生のフックJSONを直接POSTする）で受け、
+        // tool_name/tool_inputからの短い対象抽出もここC#側で行う。
+        app.MapPost("/api/claude-activity", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            using var ms = new MemoryStream();
+            await ctx.Request.Body.CopyToAsync(ms);
+            if (ms.Length > 256 * 1024) { ctx.Response.StatusCode = 413; return; }
+            try
+            {
+                using var doc = JsonDocument.Parse(ms.ToArray());
+                var root = doc.RootElement;
+                var tool = root.TryGetProperty("tool_name", out var toolProp) ? toolProp.GetString() ?? "" : "";
+                var detail = ExtractActivityDetail(tool, root);
+                var pushed = await PushClaudeActivityAsync(tool, detail);
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
+            }
+            catch (JsonException)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsync("invalid json");
+            }
+        });
+    }
+
+    /// <summary>tool_inputからアバター表示用の短い対象を抽出（ファイル名/コマンド等）。</summary>
+    private static string ExtractActivityDetail(string tool, JsonElement root)
+    {
+        if (!root.TryGetProperty("tool_input", out var input) || input.ValueKind != JsonValueKind.Object)
+            return "";
+
+        string? Get(string name) =>
+            input.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+        var detail = tool switch
+        {
+            "Bash" => Get("command"),
+            "Edit" or "Write" => Path.GetFileName(Get("file_path") ?? ""),
+            "NotebookEdit" => Path.GetFileName(Get("notebook_path") ?? ""),
+            "Read" => Path.GetFileName(Get("file_path") ?? ""),
+            "Grep" or "Glob" => Get("pattern"),
+            "WebSearch" => Get("query"),
+            "WebFetch" => Get("url"),
+            "Task" => Get("description") ?? Get("subagent_type"),
+            _ => "",
+        } ?? "";
+
+        return detail.Length > 40 ? detail[..40] + "…" : detail;
     }
 
     /// <summary>ダッシュボード/APIはlocalhostからのみ。LAN内の他端末には見せない。</summary>
@@ -196,6 +250,22 @@ class WsServer
         try
         {
             await SendJsonAsync(conn, new { type = "claude_notify", @event = ev, message });
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>接続中のスマホへClaude Codeのツール活動をプッシュ。未接続・送信失敗は false。</summary>
+    public async Task<bool> PushClaudeActivityAsync(string tool, string detail)
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            await SendJsonAsync(conn, new { type = "claude_activity", tool, detail });
             return true;
         }
         catch (Exception)
