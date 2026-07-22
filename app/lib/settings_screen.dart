@@ -7,9 +7,20 @@ const _kAccent = Color(0xFF00F5FF);
 
 /// 設定画面。渡されたAppSettingsを直接書き換え、変更のたびに保存する。
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key, required this.settings});
+  const SettingsScreen({
+    super.key,
+    required this.settings,
+    required this.claudeNotifyEnabled,
+    required this.onClaudeNotifyChanged,
+  });
 
   final AppSettings settings;
+
+  /// Claude Code通知（音・バイブ・フラッシュ）のON/OFF。
+  /// デバイスローカルの状態でありPC同期設定には含まれないため、
+  /// AppSettingsとは別に受け渡す。
+  final bool claudeNotifyEnabled;
+  final ValueChanged<bool> onClaudeNotifyChanged;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -54,6 +65,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ],
           ),
+          SwitchListTile(
+            value: s.invertScroll,
+            activeThumbColor: _kAccent,
+            title: const Text('スクロール方向を反転'),
+            secondary: const Icon(Icons.swap_vert, color: Colors.white38),
+            onChanged: (v) {
+              setState(() => s.invertScroll = v);
+              _save();
+            },
+          ),
           _header('ページ（表示と並び順）'),
           _reorderableToggles(
             entries: s.pages,
@@ -97,21 +118,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             },
           ),
           _header('Claude Code'),
-          ListTile(
-            leading: const Icon(Icons.smart_toy, color: _kAccent),
-            title: const Text('Claude Codeコマンドを編集'),
-            subtitle: Text('${s.claudeDeck.length}個のボタン',
-                style: const TextStyle(color: Colors.white38)),
-            trailing: const Icon(Icons.chevron_right, color: Colors.white38),
-            onTap: () async {
-              await Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => DeckEditorScreen(
-                        deck: s.claudeDeck,
-                        title: 'Claude Codeコマンド',
-                        onChanged: s.save,
-                      )));
-              setState(() {});
-            },
+          SwitchListTile(
+            value: widget.claudeNotifyEnabled,
+            activeThumbColor: _kAccent,
+            title: const Text('作業完了・承認待ちの通知'),
+            subtitle: const Text('音・バイブ・画面フラッシュで知らせます',
+                style: TextStyle(fontSize: 12)),
+            secondary: const Icon(Icons.smart_toy, color: Colors.white38),
+            onChanged: widget.onClaudeNotifyChanged,
           ),
           const Divider(height: 32),
           ListTile(

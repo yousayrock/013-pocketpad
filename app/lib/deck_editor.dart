@@ -69,7 +69,8 @@ class _DeckEditorScreenState extends State<DeckEditorScreen> {
                   style: TextStyle(color: Colors.white38)))
           : ReorderableListView.builder(
               padding: const EdgeInsets.only(bottom: 88),
-              buildDefaultDragHandles: false,
+              // 小さいハンドルだと狙いづらいという指摘を受け、行全体を長押しで
+              // つかんで並び替えられるデフォルト挙動に変更（buildDefaultDragHandles）。
               itemCount: deck.length,
               onReorderItem: (oldIndex, newIndex) {
                 deck.insert(newIndex, deck.removeAt(oldIndex));
@@ -95,23 +96,10 @@ class _DeckEditorScreenState extends State<DeckEditorScreen> {
                       style: const TextStyle(
                           color: Colors.white38, fontSize: 12)),
                   onTap: () => _edit(i),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.delete_outline,
-                            color: Colors.white38),
-                        onPressed: () => _confirmDelete(i),
-                      ),
-                      ReorderableDragStartListener(
-                        index: i,
-                        child: const Padding(
-                          padding: EdgeInsets.all(8),
-                          child:
-                              Icon(Icons.drag_handle, color: Colors.white38),
-                        ),
-                      ),
-                    ],
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline,
+                        color: Colors.white38),
+                    onPressed: () => _confirmDelete(i),
                   ),
                 );
               },

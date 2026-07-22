@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 const _kAccent = Color(0xFF00F5FF);
@@ -10,6 +12,7 @@ class TrackpadArea extends StatelessWidget {
     required this.onMove,
     required this.onScroll,
     required this.onClick,
+    required this.onShortcut,
     this.bottomMargin = 0,
     this.child,
   });
@@ -17,6 +20,10 @@ class TrackpadArea extends StatelessWidget {
   final void Function(double dx, double dy) onMove;
   final void Function(double dy) onScroll;
   final void Function(String button, String action) onClick;
+
+  /// スクロール帯のダブル/トリプルタップ用（ctrl+end / ctrl+home 送信）。
+  final void Function(List<String> keys) onShortcut;
+
   final double bottomMargin;
   final Widget? child;
 
@@ -33,23 +40,96 @@ class TrackpadArea extends StatelessWidget {
             child: child,
           ),
         ),
-        // スクロールストリップ
-        GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onVerticalDragUpdate: (d) => onScroll(-d.delta.dy * 4),
-          child: Container(
-            width: 60,
-            margin: EdgeInsets.fromLTRB(8, 8, 8, bottomMargin),
-            decoration: BoxDecoration(
-              border: Border.all(color: _kMagenta.withValues(alpha: 0.3)),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: const Center(
-              child: Icon(Icons.unfold_more, color: Colors.white24),
-            ),
-          ),
+        _ScrollStrip(
+          onScroll: onScroll,
+          onShortcut: onShortcut,
+          margin: EdgeInsets.fromLTRB(8, 8, 8, bottomMargin),
         ),
       ],
+    );
+  }
+}
+
+/// 右端のスクロール帯。なぞる=スクロール、ダブルタップ=末尾へ（ctrl+end）、
+/// トリプルタップ=先頭へ（ctrl+home）。
+class _ScrollStrip extends StatefulWidget {
+  const _ScrollStrip({
+    required this.onScroll,
+    required this.onShortcut,
+    required this.margin,
+  });
+
+  final void Function(double dy) onScroll;
+  final void Function(List<String> keys) onShortcut;
+  final EdgeInsets margin;
+
+  @override
+  State<_ScrollStrip> createState() => _ScrollStripState();
+}
+
+class _ScrollStripState extends State<_ScrollStrip> {
+  static const _tapMaxDuration = Duration(milliseconds: 250);
+  static const _tapMaxDistance = 20.0;
+  static const _multiTapWindow = Duration(milliseconds: 400);
+
+  Offset? _downPos;
+  DateTime? _downTime;
+  int _tapCount = 0;
+  Timer? _tapTimer;
+
+  @override
+  void dispose() {
+    _tapTimer?.cancel();
+    super.dispose();
+  }
+
+  void _registerTap() {
+    _tapCount++;
+    _tapTimer?.cancel();
+    _tapTimer = Timer(_multiTapWindow, () {
+      if (_tapCount == 2) {
+        widget.onShortcut(['ctrl', 'end']);
+      } else if (_tapCount >= 3) {
+        widget.onShortcut(['ctrl', 'home']);
+      }
+      _tapCount = 0;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      // タップ判定はジェスチャー競合の影響を受けないよう生ポインタで行う
+      // （スクロール用GestureDetector.onVerticalDragUpdateと共存させるため）
+      onPointerDown: (e) {
+        _downPos = e.position;
+        _downTime = DateTime.now();
+      },
+      onPointerUp: (e) {
+        final downTime = _downTime;
+        final downPos = _downPos;
+        if (downTime != null &&
+            downPos != null &&
+            DateTime.now().difference(downTime) < _tapMaxDuration &&
+            (e.position - downPos).distance < _tapMaxDistance) {
+          _registerTap();
+        }
+      },
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onVerticalDragUpdate: (d) => widget.onScroll(-d.delta.dy * 4),
+        child: Container(
+          width: 60,
+          margin: widget.margin,
+          decoration: BoxDecoration(
+            border: Border.all(color: _kMagenta.withValues(alpha: 0.3)),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: const Center(
+            child: Icon(Icons.unfold_more, color: Colors.white24),
+          ),
+        ),
+      ),
     );
   }
 }

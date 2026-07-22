@@ -8,7 +8,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-import 'claude_control.dart';
 import 'claude_notify_service.dart';
 import 'launcher.dart';
 import 'settings.dart';
@@ -473,15 +472,13 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   bool _showKeyboard = false;
   final _textFocus = FocusNode();
   int _tab = 0; // 表示中ページ（_settings.visiblePages のインデックス）
+  double? _navSwipeStartX; // ページ切替バーのスワイプ判定用
   AppSettings _settings = AppSettings.defaults();
   late final Future<AppSettings> _settingsFuture;
 
   /// PCからのconfigを適用済みか。ローカルload完了が後から来ても上書きしない。
   bool _remoteConfigApplied = false;
 
-  // Claude Codeコントローラー: 通知履歴はPC同期設定に含めない
-  // （デバイスローカルの一時的な状態のため）ので、ここに直接持つ。
-  ClaudeNotification? _latestClaudeNotification;
   bool _claudeNotifyEnabled = true;
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
@@ -569,22 +566,19 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
         if (mounted) _pushConfig(_settings.toJson());
       });
     } else if (j['type'] == 'claude_notify') {
-      final notif = ClaudeNotification(
-        event: (j['event'] as String?) ?? '',
-        message: (j['message'] as String?) ?? '',
-      );
-      setState(() => _latestClaudeNotification = notif);
+      // Claude Codeページ（コントローラーUI）は廃止したが、Claude Code純正の
+      // Remote Controlを使わずスマホを見ていない時に気づけるよう、通知アラート
+      // （音+バイブ+フラッシュ／バックグラウンド時はシステム通知）だけは残す。
       if (_claudeNotifyEnabled) {
-        // フォアグラウンド時はシステム通知を経由せず音+バイブ+画面フラッシュのみ
-        // （通知バーが出ると二重で邪魔になる）。バックグラウンド/ロック中は
-        // システム通知（全画面インテント）でないと気づけないのでそちらを使う。
+        final event = (j['event'] as String?) ?? '';
+        final message = (j['message'] as String?) ?? '';
         final foreground =
             WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
         if (foreground) {
-          playForegroundAlert(notif.event, notif.message);
-          _flashClaudeAlert(notif.isNotification);
+          playForegroundAlert(event, message);
+          _flashClaudeAlert(event == 'notification');
         } else {
-          showClaudeAlert(notif.event, notif.message);
+          showClaudeAlert(event, message);
         }
       }
     }
@@ -651,6 +645,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     _dx += dx * _settings.sensitivity;
     _dy += dy * _settings.sensitivity;
   }
+
+  void _onScrollDelta(double dy) =>
+      _scroll += _settings.invertScroll ? -dy : dy;
 
   void _shortcut(List<String> keys) =>
       _sendJson({'type': 'shortcut', 'keys': keys});
@@ -722,15 +719,26 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
             // タップ判定の競合は起きない）。左半分タップ=前ページ、右半分=次ページ、
             // 横スワイプでも切替できる。右端は設定への歯車（常設。下部ボタン行は
             // 非表示にできるため、消えない場所に置く）。
-            GestureDetector(
+            //
+            // GestureDetector.onHorizontalDragEnd ではなく生のポインタイベント
+            // （Listener）で判定する: 内側のチェブロン用GestureDetectorとジェスチャー
+            // アリーナで競合し、開始位置によってはスワイプが認識されないことがあった
+            // （チェブロン上から始まるドラッグが片方向だけ拾われない不具合の原因）。
+            Listener(
               behavior: HitTestBehavior.opaque,
-              onHorizontalDragEnd: (d) {
-                final v = d.primaryVelocity ?? 0;
-                if (v < -50 && tab < pages.length - 1) {
+              onPointerDown: (e) => _navSwipeStartX = e.position.dx,
+              onPointerUp: (e) {
+                final startX = _navSwipeStartX;
+                _navSwipeStartX = null;
+                if (startX == null) return;
+                final delta = e.position.dx - startX;
+                if (delta < -40 && tab < pages.length - 1) {
                   setState(() => _tab = tab + 1);
+                } else if (delta > 40 && tab > 0) {
+                  setState(() => _tab = tab - 1);
                 }
-                if (v > 50 && tab > 0) setState(() => _tab = tab - 1);
               },
+              onPointerCancel: (_) => _navSwipeStartX = null,
               child: SizedBox(
                 height: 44,
                 child: Row(
@@ -797,15 +805,32 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
               ),
             ),
             if (_settings.enabledBottomButtons.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                child: Row(
-                  children: [
-                    for (final id in _settings.enabledBottomButtons)
-                      _bottomBtnById(id),
-                  ],
-                ),
-              ),
+              // 物理/論理ピクセル換算のずれで幅ベース判定が誤動作したため、
+              // ピクセル計算に頼らずボタン数だけで切り替える。Expandedは
+              // 何個あっても絶対に画面幅からはみ出さない（=見切れない）ので、
+              // 「そこそこの数まではExpandedで均等フィット、それより多い時だけ
+              // 自然な幅で横スクロール」という単純な閾値にする。
+              _settings.enabledBottomButtons.length <= 6
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Row(
+                        children: [
+                          for (final id in _settings.enabledBottomButtons)
+                            _bottomBtnById(id, expand: true),
+                        ],
+                      ),
+                    )
+                  : SizedBox(
+                      height: 52,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        children: [
+                          for (final id in _settings.enabledBottomButtons)
+                            _bottomBtnById(id, expand: false),
+                        ],
+                      ),
+                    ),
             const SizedBox(height: 8),
           ],
         ),
@@ -816,35 +841,26 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   /// ページIDから本体ウィジェットを生成。
   Widget _buildPage(String id) {
     switch (id) {
-      case 'claude':
-        return ClaudeControlPanel(
-          latest: _latestClaudeNotification,
-          onSend: _sendJson,
-          notifyEnabled: _claudeNotifyEnabled,
-          onToggleNotify: _setClaudeNotifyEnabled,
-          deck: _settings.claudeDeck,
-          onMove: _move,
-          onScroll: (dy) => _scroll += dy,
-        );
       case 'youtube':
         return YoutubePanel(
           onSend: _sendJson,
           onMove: _move,
-          onScroll: (dy) => _scroll += dy,
+          onScroll: _onScrollDelta,
         );
       case 'macro':
         return LauncherPanel(
           buttons: _settings.deck,
           onSend: _sendJson,
           onMove: _move,
-          onScroll: (dy) => _scroll += dy,
+          onScroll: _onScrollDelta,
         );
       default: // trackpad
         return TrackpadArea(
           onMove: _move,
-          onScroll: (dy) => _scroll += dy,
+          onScroll: _onScrollDelta,
           onClick: (button, action) =>
               _sendJson({'type': 'click', 'button': button, 'action': action}),
+          onShortcut: _shortcut,
           bottomMargin: 8,
           child: const Center(
             child: Text(
@@ -858,26 +874,31 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   }
 
   /// 下部操作ボタンをIDから生成（表示・並び順は設定に従う）。
-  Widget _bottomBtnById(String id) {
+  /// expand=trueなら画面幅に均等フィット、falseなら自然な幅（横スクロール用）。
+  Widget _bottomBtnById(String id, {required bool expand}) {
     switch (id) {
       case 'enter':
-        return _iconBtn(Icons.keyboard_return, () => _shortcut(['enter']));
+        return _iconBtn(Icons.keyboard_return, () => _shortcut(['enter']),
+            expand: expand);
       case 'backspace':
-        return _backspaceBtn();
+        return _backspaceBtn(expand: expand);
       case 'keyboard':
         return _iconBtn(
           _showKeyboard ? Icons.keyboard_hide : Icons.keyboard,
           () => setState(() => _showKeyboard = !_showKeyboard),
+          expand: expand,
         );
       case 'alttab':
-        return _iconBtn(Icons.swap_horiz, () => _shortcut(['alt', 'tab']));
+        return _iconBtn(Icons.swap_horiz, () => _shortcut(['alt', 'tab']),
+            expand: expand);
       case 'win':
-        return _iconBtn(Icons.window, () => _shortcut(['win']));
+        return _iconBtn(Icons.window, () => _shortcut(['win']), expand: expand);
       case 'mic':
         return _iconBtn(
           _micListening ? Icons.mic : Icons.mic_none,
           _toggleMic,
           color: _micListening ? kMagenta : null,
+          expand: expand,
         );
       default:
         return const SizedBox.shrink();
@@ -913,7 +934,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     setState(() => _micListening = true);
     await _speech.listen(
       onResult: (result) {
-        if (result.finalResult && result.recognizedWords.isNotEmpty) {
+        if (!result.finalResult) return;
+        if (result.recognizedWords.isNotEmpty) {
           _sendJson({
             'type': 'macro',
             'steps': [
@@ -922,14 +944,36 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
             ],
           });
         }
+        // ここでこちらから明示stop()すると、OS側が無音判定で自然に終了する際の
+        // 完了音（ピロ）と競合し鳴らないことがあったため呼ばない。終了検知は
+        // onStatusのnotListening/doneに任せる（_micListeningのfalse化もそちら）。
       },
-      listenOptions: SpeechListenOptions(localeId: 'ja_JP'),
+      // pauseFor: 無音がこの時間続くまで自動送信しない（デフォルトが短く
+      // 話し終える前に切れる、というフィードバックを受けて延長したが、
+      // 8秒は長すぎて逆に精度が悪く感じられたため短縮）。
+      // 端末によってはAndroid自体が1〜3秒で無音判定を打ち切ることがあり、
+      // その場合はOS側の制限が優先される（プラグイン側では回避不可）。
+      //
+      // listenMode: dictation は confirmation/search 用のモードと違い長文の
+      // 書き取り用。話し始めの頭が切れる問題の軽減を期待して指定。
+      listenOptions: SpeechListenOptions(
+        localeId: 'ja_JP',
+        pauseFor: const Duration(seconds: 4),
+        listenFor: const Duration(seconds: 60),
+        listenMode: ListenMode.dictation,
+      ),
     );
   }
 
   Future<void> _openSettings() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => SettingsScreen(settings: _settings)),
+      MaterialPageRoute(
+        builder: (_) => SettingsScreen(
+          settings: _settings,
+          claudeNotifyEnabled: _claudeNotifyEnabled,
+          onClaudeNotifyChanged: _setClaudeNotifyEnabled,
+        ),
+      ),
     );
     if (!mounted) return;
     // 設定画面でページ構成が変わった可能性があるので反映＋タブを範囲内に収める
@@ -938,59 +982,60 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     });
   }
 
-  /// バックスペースボタン。タップで1文字、長押しで連続削除。
-  Widget _backspaceBtn() {
-    return Expanded(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2),
-        child: Listener(
-          onPointerUp: (_) => _bsRepeat?.cancel(),
-          onPointerCancel: (_) => _bsRepeat?.cancel(),
-          child: OutlinedButton(
-            onPressed: () => _shortcut(['backspace']),
-            onLongPress: () {
-              _shortcut(['backspace']);
-              _bsRepeat?.cancel();
-              _bsRepeat = Timer.periodic(
-                const Duration(milliseconds: 90),
-                (_) => _shortcut(['backspace']),
-              );
-            },
-            style: OutlinedButton.styleFrom(
-              foregroundColor: kAccent,
-              side: BorderSide(color: kAccent.withValues(alpha: 0.4)),
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            child: const Icon(Icons.backspace_outlined, size: 22),
-          ),
-        ),
-      ),
-    );
-  }
+  /// 下部ボタン共通の幅（横スクロール表示のため固定幅で並べる）。
+  static const _bottomBtnWidth = 72.0;
 
-  Widget _iconBtn(IconData icon, VoidCallback onTap, {int flex = 1, Color? color}) {
-    final c = color ?? kAccent;
-    return Expanded(
-      flex: flex,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 2),
+  /// バックスペースボタン。タップで1文字、長押しで連続削除。
+  Widget _backspaceBtn({required bool expand}) {
+    final button = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: Listener(
+        onPointerUp: (_) => _bsRepeat?.cancel(),
+        onPointerCancel: (_) => _bsRepeat?.cancel(),
         child: OutlinedButton(
-          onPressed: onTap,
+          onPressed: () => _shortcut(['backspace']),
+          onLongPress: () {
+            _shortcut(['backspace']);
+            _bsRepeat?.cancel();
+            _bsRepeat = Timer.periodic(
+              const Duration(milliseconds: 90),
+              (_) => _shortcut(['backspace']),
+            );
+          },
           style: OutlinedButton.styleFrom(
-            foregroundColor: c,
-            side: BorderSide(color: c.withValues(alpha: 0.4)),
+            foregroundColor: kAccent,
+            side: BorderSide(color: kAccent.withValues(alpha: 0.4)),
             padding: const EdgeInsets.symmetric(vertical: 14),
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
           ),
-          child: Icon(icon, size: 22),
+          child: Icon(Icons.backspace_outlined, size: expand ? 26 : 22),
         ),
       ),
     );
+    return expand ? Expanded(child: button) : SizedBox(width: _bottomBtnWidth, child: button);
+  }
+
+  Widget _iconBtn(IconData icon, VoidCallback onTap,
+      {Color? color, required bool expand}) {
+    final c = color ?? kAccent;
+    final button = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      child: OutlinedButton(
+        onPressed: onTap,
+        style: OutlinedButton.styleFrom(
+          foregroundColor: c,
+          side: BorderSide(color: c.withValues(alpha: 0.4)),
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+        ),
+        child: Icon(icon, size: expand ? 26 : 22),
+      ),
+    );
+    return expand ? Expanded(child: button) : SizedBox(width: _bottomBtnWidth, child: button);
   }
 
   void _sendText() {

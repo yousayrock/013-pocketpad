@@ -38,6 +38,7 @@ class YoutubePanel extends StatelessWidget {
             onMove: onMove,
             onScroll: onScroll,
             onClick: _click,
+            onShortcut: (keys) => onSend({'type': 'shortcut', 'keys': keys}),
             child: const Center(
               child: Icon(Icons.touch_app, color: Colors.white12, size: 32),
             ),

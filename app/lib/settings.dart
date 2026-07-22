@@ -110,14 +110,12 @@ const kPageNames = {
   'trackpad': 'トラックパッド',
   'macro': 'マクロ',
   'youtube': 'YouTube',
-  'claude': 'Claude Code',
 };
 
 const kPageIcons = {
   'trackpad': Icons.touch_app,
   'macro': Icons.grid_view,
   'youtube': Icons.play_circle_outline,
-  'claude': Icons.smart_toy,
 };
 
 const kBottomButtonNames = {
@@ -179,7 +177,7 @@ class AppSettings {
     required this.bottomButtons,
     required this.sensitivity,
     required this.deck,
-    required this.claudeDeck,
+    this.invertScroll = false,
   });
 
   /// 全ページ（順序付き。非表示でも順序を保持する）
@@ -194,8 +192,8 @@ class AppSettings {
   /// マクロページのボタン
   List<DeckButton> deck;
 
-  /// Claude Codeページのコマンドボタン
-  List<DeckButton> claudeDeck;
+  /// トラックパッドのスクロール方向を反転するか
+  bool invertScroll;
 
   /// 保存時に呼ばれるフック（PCへのconfig_set送信用）。シリアライズ対象外。
   void Function(Map<String, dynamic> json)? onSaved;
@@ -211,7 +209,6 @@ class AppSettings {
         ],
         sensitivity: 1.4,
         deck: List.of(defaultDeck),
-        claudeDeck: List.of(defaultClaudeDeck),
       );
 
   /// 表示するページID（enabledのみ、順序どおり）。必ず1件以上になる。
@@ -228,7 +225,7 @@ class AppSettings {
         'bottomButtons': [for (final b in bottomButtons) b.toJson()],
         'sensitivity': sensitivity,
         'deck': [for (final b in deck) deckButtonToJson(b)],
-        'claudeDeck': [for (final b in claudeDeck) deckButtonToJson(b)],
+        'invertScroll': invertScroll,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) {
@@ -243,12 +240,7 @@ class AppSettings {
           if (e is Map) deckButtonFromJson(e.cast<String, dynamic>()),
       ];
     }
-    if (j['claudeDeck'] is List) {
-      s.claudeDeck = [
-        for (final e in j['claudeDeck'] as List)
-          if (e is Map) deckButtonFromJson(e.cast<String, dynamic>()),
-      ];
-    }
+    s.invertScroll = j['invertScroll'] == true;
     s._sanitize();
     return s;
   }
