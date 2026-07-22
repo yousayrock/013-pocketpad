@@ -29,6 +29,18 @@ class SettingsScreen extends StatefulWidget {
 class _SettingsScreenState extends State<SettingsScreen> {
   AppSettings get s => widget.settings;
 
+  // widget.claudeNotifyEnabledはこの画面をpushした時点の値で固定されており、
+  // 親（TrackpadScreen）側のsetStateだけではこの画面の見た目が更新されない
+  // （AppSettingsはオブジェクト直接書き換えなので問題ないが、こちらは単純な
+  // bool値+コールバックの受け渡しのため）。ローカルにも状態を持つ。
+  late bool _claudeNotifyEnabled;
+
+  @override
+  void initState() {
+    super.initState();
+    _claudeNotifyEnabled = widget.claudeNotifyEnabled;
+  }
+
   void _save() {
     s.save();
     setState(() {});
@@ -68,6 +80,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SwitchListTile(
             value: s.invertScroll,
             activeThumbColor: _kAccent,
+            tileColor: Colors.transparent,
             title: const Text('スクロール方向を反転'),
             secondary: const Icon(Icons.swap_vert, color: Colors.white38),
             onChanged: (v) {
@@ -119,13 +132,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           _header('Claude Code'),
           SwitchListTile(
-            value: widget.claudeNotifyEnabled,
+            value: _claudeNotifyEnabled,
             activeThumbColor: _kAccent,
+            tileColor: Colors.transparent,
             title: const Text('作業完了・承認待ちの通知'),
             subtitle: const Text('音・バイブ・画面フラッシュで知らせます',
                 style: TextStyle(fontSize: 12)),
             secondary: const Icon(Icons.smart_toy, color: Colors.white38),
-            onChanged: widget.onClaudeNotifyChanged,
+            onChanged: (v) {
+              setState(() => _claudeNotifyEnabled = v);
+              widget.onClaudeNotifyChanged(v);
+            },
           ),
           const Divider(height: 32),
           ListTile(

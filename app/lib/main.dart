@@ -486,6 +486,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
   bool _micListening = false;
+  String _micLastWords = '';
+  bool _micSent = false;
   static const _claudeNotifyPrefsKey = 'claude_notify_enabled';
 
   @override
@@ -928,6 +930,10 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   /// 送信する（クリップボード等ではなく、常にフォーカス中の入力欄へEnter付きで送る）。
   Future<void> _toggleMic() async {
     if (_micListening) {
+      // 扇風機など常時ノイズがある環境ではOS側の無音判定(pauseFor)が働かず
+      // 自動送信されないことがあるため、手動停止時にその時点までの認識結果を
+      // こちらから確実に送る（onResultのfinalResultを待たない）。
+      _sendMicResultIfAny();
       await _speech.stop();
       if (mounted) setState(() => _micListening = false);
       return;
@@ -950,19 +956,16 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       }
       return;
     }
+    _micLastWords = '';
+    _micSent = false;
     setState(() => _micListening = true);
     await _speech.listen(
       onResult: (result) {
+        // 途中経過でも常に最新の認識結果を保持しておく（手動停止時の
+        // フォールバック送信で使うため）。
+        _micLastWords = result.recognizedWords;
         if (!result.finalResult) return;
-        if (result.recognizedWords.isNotEmpty) {
-          _sendJson({
-            'type': 'macro',
-            'steps': [
-              {'type': 'text', 'text': result.recognizedWords},
-              {'type': 'shortcut', 'keys': ['enter']},
-            ],
-          });
-        }
+        _sendMicResultIfAny();
         // ここでこちらから明示stop()すると、OS側が無音判定で自然に終了する際の
         // 完了音（ピロ）と競合し鳴らないことがあったため呼ばない。終了検知は
         // onStatusのnotListening/doneに任せる（_micListeningのfalse化もそちら）。
@@ -977,11 +980,26 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       // 書き取り用。話し始めの頭が切れる問題の軽減を期待して指定。
       listenOptions: SpeechListenOptions(
         localeId: 'ja_JP',
-        pauseFor: const Duration(seconds: 4),
+        pauseFor: const Duration(seconds: 3),
         listenFor: const Duration(seconds: 60),
         listenMode: ListenMode.dictation,
       ),
     );
+  }
+
+  /// マイクの認識結果を1回だけ送信する（onResultのfinalResultと手動停止の
+  /// 両方から呼ばれうるため、二重送信しないよう_micSentでガードする）。
+  void _sendMicResultIfAny() {
+    if (_micSent) return;
+    _micSent = true;
+    if (_micLastWords.isEmpty) return;
+    _sendJson({
+      'type': 'macro',
+      'steps': [
+        {'type': 'text', 'text': _micLastWords},
+        {'type': 'shortcut', 'keys': ['enter']},
+      ],
+    });
   }
 
   Future<void> _openSettings() async {
