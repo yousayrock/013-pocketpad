@@ -30,6 +30,21 @@ class ClaudeNotifyEvent {
   final DateTime time;
 }
 
+/// PC側のTodoWriteフックから届いたTODO1件（`claude_todos`）。
+class TodoItem {
+  const TodoItem({required this.content, required this.status, required this.activeForm});
+
+  factory TodoItem.fromJson(Map<String, dynamic> j) => TodoItem(
+        content: (j['content'] as String?) ?? '',
+        status: (j['status'] as String?) ?? 'pending',
+        activeForm: (j['activeForm'] as String?) ?? '',
+      );
+
+  final String content;
+  final String status; // "pending" | "in_progress" | "completed"
+  final String activeForm;
+}
+
 /// オフィス内の「持ち場」。キャラクターがこの位置(Alignment)へ移動する。
 class _Zone {
   const _Zone(this.align, this.propIcon, this.verb, this.roomName, this.color);
@@ -94,7 +109,18 @@ int _xpForTool(String tool) {
   }
 }
 
-const _xpPerStop = 15;
+const _xpPerStop = 20;
+
+/// TODOを1件「完了」にするごとのXP。TodoWriteの進捗にも育成が連動する。
+const _xpPerTodo = 5;
+
+/// 1ターン中にツールを何回使ったか（=仕事の大変さの目安）に応じたボーナスXP。
+/// 難しい仕事＝ツール呼び出しが多いターンほど、完了時にまとまった追加報酬を出す。
+int _stopBonus(int toolCallsThisTurn) {
+  if (toolCallsThisTurn >= 15) return 25;
+  if (toolCallsThisTurn >= 8) return 10;
+  return 0;
+}
 
 /// レベルNからN+1に上がるのに必要な経験値。
 int _xpToNext(int level) => 80 + (level - 1) * 20;
@@ -180,14 +206,6 @@ class _Status {
   final IconData icon;
   final Color color;
   final String label;
-}
-
-class _LogEntry {
-  const _LogEntry({required this.icon, required this.color, required this.label, required this.time});
-  final IconData icon;
-  final Color color;
-  final String label;
-  final DateTime time;
 }
 
 // ─────────────────────────────────────── ドット絵キャラクター
@@ -327,8 +345,14 @@ class _FloorPainter extends CustomPainter {
 /// レベルアップ時に一瞬だけ出る祝福バナー。main.dartの_ClaudeFlashと同じ
 /// 自己完結OverlayEntry方式（アニメーション終了で自動的に自分を消す）。
 class _LevelUpBanner extends StatefulWidget {
-  const _LevelUpBanner({required this.level, required this.rank, required this.onDone});
+  const _LevelUpBanner({
+    required this.name,
+    required this.level,
+    required this.rank,
+    required this.onDone,
+  });
 
+  final String name;
   final int level;
   final String rank;
   final VoidCallback onDone;
@@ -408,7 +432,7 @@ class _LevelUpBannerState extends State<_LevelUpBanner>
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Lv.${widget.level} ${widget.rank}',
+                  '${widget.name}  Lv.${widget.level} ${widget.rank}',
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.bold,
@@ -424,32 +448,45 @@ class _LevelUpBannerState extends State<_LevelUpBanner>
 
 /// 部屋（持ち場）1つ分のカード。什器アイコン+ラベルを部屋の色でタグ付けする。
 class _RoomCard extends StatelessWidget {
-  const _RoomCard({required this.zone});
+  const _RoomCard({required this.zone, this.onTap});
   final _Zone zone;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: zone.color.withValues(alpha: 0.14),
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: zone.color.withValues(alpha: 0.4)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(zone.propIcon, color: zone.color, size: 30),
-          const SizedBox(height: 3),
-          Text(
-            zone.roomName,
-            style: TextStyle(
-              color: zone.color,
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: zone.color.withValues(alpha: 0.14),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: zone.color.withValues(alpha: 0.4)),
+          ),
+          // 画面が小さい端末だと4部屋分の縦幅が窮屈になりオーバーフローしうるため、
+          // FittedBoxで使える範囲いっぱいまで縮小させる（はみ出させない）。
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(zone.propIcon, color: zone.color, size: 30),
+                const SizedBox(height: 3),
+                Text(
+                  zone.roomName,
+                  style: TextStyle(
+                    color: zone.color,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -458,18 +495,22 @@ class _RoomCard extends StatelessWidget {
 /// オフィス上部の育成ステータス表示。アバターチップ + レベル/役職 + 経験値バー。
 class _StatsHeader extends StatelessWidget {
   const _StatsHeader({
+    required this.name,
     required this.level,
     required this.xp,
     required this.xpToNext,
     required this.rank,
     required this.color,
+    required this.onNameTap,
   });
 
+  final String name;
   final int level;
   final int xp;
   final int xpToNext;
   final String rank;
   final Color color;
+  final VoidCallback onNameTap;
 
   @override
   Widget build(BuildContext context) {
@@ -494,9 +535,23 @@ class _StatsHeader extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Lv.$level $rank',
-                  style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 15),
+                GestureDetector(
+                  onTap: onNameTap,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          '$name  Lv.$level $rank',
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: color, fontWeight: FontWeight.bold, fontSize: 15),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Icon(Icons.edit, color: color.withValues(alpha: 0.6), size: 12),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 5),
                 Stack(
@@ -536,6 +591,63 @@ class _StatsHeader extends StatelessWidget {
   }
 }
 
+/// 下半分の「TODOリスト」。Claude Code自身のTodoWriteの進捗をそのまま見せる
+/// （未着手/実行中/完了）。完了した分は_onTodosUpdatedでXPにも反映される。
+class _TodoPanel extends StatelessWidget {
+  const _TodoPanel({required this.todos, required this.color});
+  final List<TodoItem> todos;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    if (todos.isEmpty) {
+      return const Center(
+        child: Text(
+          'Claude CodeがTODOを作ると\nここに一覧が表示されます',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white24, fontSize: 12),
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      itemCount: todos.length,
+      itemBuilder: (context, i) {
+        final t = todos[i];
+        final done = t.status == 'completed';
+        final active = t.status == 'in_progress';
+        final icon = done
+            ? Icons.check_circle
+            : active
+                ? Icons.autorenew
+                : Icons.radio_button_unchecked;
+        final iconColor = done ? color : (active ? _kMagenta : Colors.white24);
+        final label = active && t.activeForm.isNotEmpty ? t.activeForm : t.content;
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, color: iconColor, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: done ? Colors.white38 : Colors.white70,
+                    fontSize: 13,
+                    decoration: done ? TextDecoration.lineThrough : null,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// 「かんぱにっち」ページ。Claude Codeが今何をしているかをドット絵キャラクターで見せながら、
 /// タスクをこなすたびにユーザーと一緒にレベルアップしていく育成要素つきビューワー。
 /// オフィス内の持ち場（編集/コマンド/調査/委任/待機）を活動に応じて移動する。
@@ -545,6 +657,7 @@ class KanpanicchiPanel extends StatefulWidget {
     super.key,
     required this.latestActivity,
     required this.latestNotify,
+    required this.todos,
     required this.onMove,
     required this.onScroll,
     required this.onClick,
@@ -553,6 +666,7 @@ class KanpanicchiPanel extends StatefulWidget {
 
   final ClaudeActivity? latestActivity;
   final ClaudeNotifyEvent? latestNotify;
+  final List<TodoItem> todos;
   final void Function(double dx, double dy) onMove;
   final void Function(double dy) onScroll;
   final void Function(String button, String action) onClick;
@@ -569,7 +683,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   bool _showTrackpad = false;
   _Zone _zone = _zoneIdle;
   _Status _status = const _Status(icon: Icons.chair_alt, color: Colors.white38, label: '待機中');
-  final List<_LogEntry> _log = [];
+  // 部屋タップで詳細を見せるための、部屋ごとの直近の活動（生のツール/対象/時刻）。
+  final Map<String, ClaudeActivity> _lastActivityByRoom = {};
+  // 今のターン（次のstopまで）で何回ツールを使ったか。完了時のボーナスXP判定に使う。
+  int _toolCallsSinceStop = 0;
   Timer? _idleTimer;
   Timer? _doneRevertTimer;
   Timer? _walkFrameTimer;
@@ -585,9 +702,11 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   static const _kLevelKey = 'kanpanicchi_level';
   static const _kXpKey = 'kanpanicchi_xp';
   static const _kLifetimeKey = 'kanpanicchi_lifetime_events';
+  static const _kNameKey = 'kanpanicchi_display_name';
   int _level = 1;
   int _xp = 0;
   int _lifetimeEvents = 0;
+  String _displayName = kCharacterName;
   // ツール呼び出しの経験値ファーミング対策: 直近の付与時刻と、直近60秒間に
   // 経験値を付与したツール呼び出し回数を覚えておき、連打を弾く。
   // stopイベント（ターン完了）はターン単位で自然にレート制限されるため対象外。
@@ -609,8 +728,44 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
         _level = p.getInt(_kLevelKey) ?? 1;
         _xp = p.getInt(_kXpKey) ?? 0;
         _lifetimeEvents = p.getInt(_kLifetimeKey) ?? 0;
+        final savedName = p.getString(_kNameKey);
+        if (savedName != null && savedName.isNotEmpty) _displayName = savedName;
       });
     });
+  }
+
+  /// 社員に好きな名前をつけられるリネームダイアログ。ステータス欄の名前タップで開く。
+  Future<void> _renameCharacter() async {
+    final controller = TextEditingController(text: _displayName);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: const Color(0xFF0A1020),
+        title: const Text('名前を変更', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 12,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(hintText: 'かんぱにっち'),
+          onSubmitted: (v) => Navigator.pop(context, v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('キャンセル'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    if (result == null) return;
+    final name = result.trim().isEmpty ? kCharacterName : result.trim();
+    setState(() => _displayName = name);
+    SharedPreferences.getInstance().then((p) => p.setString(_kNameKey, name));
   }
 
   /// たまごっちらしい「生きてる感」のための瞬き。数秒おきに一瞬だけ目を閉じる。
@@ -670,6 +825,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     entry = OverlayEntry(
       builder: (context) => IgnorePointer(
         child: _LevelUpBanner(
+          name: _displayName,
           level: _level,
           rank: _rankFor(_level),
           onDone: () => entry.remove(),
@@ -677,6 +833,62 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
       ),
     );
     overlay.insert(entry);
+  }
+
+  /// 部屋タップ時、その部屋での直近の活動を詳しく見せる（メインの一言は
+  /// あえて簡略化しているため、気になる人向けに生のツール名/対象を出す）。
+  void _showRoomDetail(_Zone zone) {
+    final activity = _lastActivityByRoom[zone.roomName];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0A1020),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(zone.propIcon, color: zone.color, size: 22),
+                const SizedBox(width: 8),
+                Text(
+                  zone.roomName,
+                  style: TextStyle(color: zone.color, fontWeight: FontWeight.bold, fontSize: 18),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            if (activity == null)
+              const Text(
+                'まだこの部屋での活動はありません',
+                style: TextStyle(color: Colors.white38, fontSize: 13),
+              )
+            else ...[
+              Text(
+                '最後の活動: ${activity.tool}',
+                style: const TextStyle(color: Colors.white70, fontSize: 14),
+              ),
+              if (activity.detail.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  activity.detail,
+                  style: const TextStyle(color: Colors.white54, fontSize: 13),
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+              const SizedBox(height: 6),
+              Text(_fmtTime(activity.time),
+                  style: const TextStyle(color: Colors.white24, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -690,6 +902,21 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     if (notify != null && !identical(notify, oldWidget.latestNotify)) {
       _onNotify(notify);
     }
+    if (!identical(widget.todos, oldWidget.todos)) {
+      _onTodosUpdated(oldWidget.todos, widget.todos);
+    }
+  }
+
+  /// TODOが新たに完了（pending/in_progress → completed）になった分だけXPを渡す。
+  /// contentの文字列で前後の対応を取る（TodoWriteはターン内で同じ内容を使い回すため）。
+  void _onTodosUpdated(List<TodoItem> oldTodos, List<TodoItem> newTodos) {
+    final wasCompleted = {
+      for (final t in oldTodos)
+        if (t.status == 'completed') t.content,
+    };
+    final newlyCompleted =
+        newTodos.where((t) => t.status == 'completed' && !wasCompleted.contains(t.content)).length;
+    if (newlyCompleted > 0) _awardXp(_xpPerTodo * newlyCompleted);
   }
 
   void _armIdleTimer() {
@@ -697,11 +924,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     _idleTimer = Timer(const Duration(seconds: 30), () {
       if (mounted) _moveTo(_zoneIdle, _zoneIdle.color, _zoneIdle.verb);
     });
-  }
-
-  void _pushLog(IconData icon, Color color, String label, DateTime time) {
-    _log.insert(0, _LogEntry(icon: icon, color: color, label: label, time: time));
-    if (_log.length > 8) _log.removeLast();
   }
 
   /// キャラクターを指定ゾーンへ歩かせて、到着後にラベル/色を反映する。
@@ -729,9 +951,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     final zone = _zoneFor(a.tool);
     final label = _activitySentence(a.tool, a.detail);
     _moveTo(zone, zone.color, label);
-    _pushLog(zone.propIcon, zone.color, label, a.time);
+    _lastActivityByRoom[zone.roomName] = a;
     _doneRevertTimer?.cancel();
     _armIdleTimer();
+    _toolCallsSinceStop++;
     _awardXp(_xpForTool(a.tool), tool: a.tool);
   }
 
@@ -739,17 +962,19 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     final isWaiting = n.event == 'notification';
     final icon = isWaiting ? Icons.notifications_active : Icons.check_circle;
     final color = isWaiting ? _kMagenta : _kAccent;
-    final label = isWaiting ? '承認を待っています: ${n.message}' : '完了しました: ${n.message}';
-    setState(() => _status = _Status(icon: icon, color: color, label: label));
-    _pushLog(icon, color, label, n.time);
+    var label = isWaiting ? '承認を待っています: ${n.message}' : '完了しました: ${n.message}';
     _doneRevertTimer?.cancel();
     if (!isWaiting) {
       // 完了はしばらく強調してから待機に戻す
       _doneRevertTimer = Timer(const Duration(seconds: 3), () {
         if (mounted) _moveTo(_zoneIdle, _zoneIdle.color, _zoneIdle.verb);
       });
-      _awardXp(_xpPerStop);
+      final bonus = _stopBonus(_toolCallsSinceStop);
+      _toolCallsSinceStop = 0;
+      if (bonus > 0) label = '$label（大変な仕事お疲れさま！ボーナスXP+$bonus）';
+      _awardXp(_xpPerStop + bonus);
     }
+    setState(() => _status = _Status(icon: icon, color: color, label: label));
     _armIdleTimer();
   }
 
@@ -806,11 +1031,13 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                           child: Column(
                             children: [
                               _StatsHeader(
+                                name: _displayName,
                                 level: _level,
                                 xp: _xp,
                                 xpToNext: _xpToNext(_level),
                                 rank: _rankFor(_level),
                                 color: _status.color,
+                                onNameTap: _renameCharacter,
                               ),
                               Expanded(
                                 child: Stack(
@@ -828,7 +1055,13 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                       _zoneSearching,
                                       _zoneDelegating,
                                     })
-                                      Align(alignment: z.align, child: _RoomCard(zone: z)),
+                                      Align(
+                                        alignment: z.align,
+                                        child: _RoomCard(
+                                          zone: z,
+                                          onTap: () => _showRoomDetail(z),
+                                        ),
+                                      ),
                                     // キャラクター本体
                                     AnimatedAlign(
                                       duration: _moveDuration,
@@ -837,10 +1070,13 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                       child: AnimatedBuilder(
                                         animation: _bounce,
                                         builder: (context, child) {
-                                          final offsetY = _walking ? 0.0 : -_bounce.value * 3;
-                                          // 什器アイコンの真上に立たず、少し右にずれて隣に立つように
+                                          final bounceY = _walking ? 0.0 : -_bounce.value * 3;
+                                          // 部屋カードの真上に重ならないよう、部屋の中心から
+                                          // 画面の外側（コーナー側）へずらして隣に立たせる。
+                                          final dx = 46.0 * (_zone.align.x >= 0 ? 1 : -1);
+                                          final dy = 30.0 * (_zone.align.y >= 0 ? 1 : -1);
                                           return Transform.translate(
-                                            offset: Offset(30, offsetY),
+                                            offset: Offset(dx, dy + bounceY),
                                             child: child,
                                           );
                                         },
@@ -896,30 +1132,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                 ),
               ),
               Expanded(
-                child: _log.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'Claude Codeがツールを使うと\nここに活動ログが流れます',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.white24, fontSize: 12),
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        itemCount: _log.length,
-                        itemBuilder: (context, i) {
-                          final e = _log[i];
-                          return ListTile(
-                            dense: true,
-                            visualDensity: VisualDensity.compact,
-                            leading: Icon(e.icon, color: e.color, size: 18),
-                            title: Text(e.label,
-                                style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                            trailing: Text(_fmtTime(e.time),
-                                style: const TextStyle(color: Colors.white24, fontSize: 10)),
-                          );
-                        },
-                      ),
+                child: _TodoPanel(todos: widget.todos, color: _status.color),
               ),
             ],
           ),

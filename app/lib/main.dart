@@ -483,6 +483,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   bool _claudeNotifyEnabled = true;
   ClaudeActivity? _lastClaudeActivity;
   ClaudeNotifyEvent? _lastClaudeNotifyEvent;
+  List<TodoItem> _lastTodos = [];
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
   bool _micListening = false;
@@ -592,6 +593,11 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       final tool = (j['tool'] as String?) ?? '';
       final detail = (j['detail'] as String?) ?? '';
       setState(() => _lastClaudeActivity = ClaudeActivity(tool: tool, detail: detail));
+    } else if (j['type'] == 'claude_todos') {
+      final raw = (j['todos'] as List?) ?? const [];
+      setState(() => _lastTodos = [
+            for (final t in raw) TodoItem.fromJson((t as Map).cast<String, dynamic>()),
+          ]);
     }
   }
 
@@ -856,6 +862,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
         return KanpanicchiPanel(
           latestActivity: _lastClaudeActivity,
           latestNotify: _lastClaudeNotifyEvent,
+          todos: _lastTodos,
           onMove: _move,
           onScroll: _onScrollDelta,
           onClick: (button, action) =>

@@ -167,6 +167,11 @@ class WsServer
                 var tool = root.TryGetProperty("tool_name", out var toolProp) ? toolProp.GetString() ?? "" : "";
                 var detail = ExtractActivityDetail(tool, root);
                 var pushed = await PushClaudeActivityAsync(tool, detail);
+                if (tool == "TodoWrite")
+                {
+                    var todos = ExtractTodos(root);
+                    if (todos is not null) await PushClaudeTodosAsync(todos);
+                }
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
             }
@@ -201,6 +206,31 @@ class WsServer
         } ?? "";
 
         return detail.Length > 40 ? detail[..40] + "…" : detail;
+    }
+
+    /// <summary>TodoWrite呼び出しのtool_input.todosを、スマホへ中継する形（content/status/activeForm
+    /// の配列）に変換する。想定外の形なら中継しない（null）。</summary>
+    private static List<object>? ExtractTodos(JsonElement root)
+    {
+        if (!root.TryGetProperty("tool_input", out var input) || input.ValueKind != JsonValueKind.Object)
+            return null;
+        if (!input.TryGetProperty("todos", out var todosEl) || todosEl.ValueKind != JsonValueKind.Array)
+            return null;
+
+        var result = new List<object>();
+        foreach (var t in todosEl.EnumerateArray())
+        {
+            if (t.ValueKind != JsonValueKind.Object) continue;
+            string? Get(string name) =>
+                t.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            result.Add(new
+            {
+                content = Get("content") ?? "",
+                status = Get("status") ?? "pending",
+                activeForm = Get("activeForm") ?? "",
+            });
+        }
+        return result;
     }
 
     /// <summary>ダッシュボード/APIはlocalhostからのみ。LAN内の他端末には見せない。</summary>
@@ -266,6 +296,22 @@ class WsServer
         try
         {
             await SendJsonAsync(conn, new { type = "claude_activity", tool, detail });
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>接続中のスマホへClaude CodeのTODOリスト（TodoWrite）をプッシュ。</summary>
+    public async Task<bool> PushClaudeTodosAsync(List<object> todos)
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            await SendJsonAsync(conn, new { type = "claude_todos", todos });
             return true;
         }
         catch (Exception)
