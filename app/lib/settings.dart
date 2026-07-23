@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'kanpanicchi.dart';
 import 'launcher.dart';
 
 // ─────────────────────────────────────── アイコンカタログ
@@ -110,14 +111,14 @@ const kPageNames = {
   'trackpad': 'トラックパッド',
   'macro': 'マクロ',
   'youtube': 'YouTube',
-  'office': 'AI社員',
+  'office': kCharacterName,
 };
 
 const kPageIcons = {
   'trackpad': Icons.touch_app,
   'macro': Icons.grid_view,
   'youtube': Icons.play_circle_outline,
-  'office': Icons.support_agent,
+  'office': Icons.pets,
 };
 
 const kBottomButtonNames = {

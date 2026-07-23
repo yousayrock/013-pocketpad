@@ -8,7 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-import 'ai_office.dart';
+import 'kanpanicchi.dart';
 import 'claude_notify_service.dart';
 import 'launcher.dart';
 import 'settings.dart';
@@ -853,7 +853,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   Widget _buildPage(String id) {
     switch (id) {
       case 'office':
-        return AiOfficePanel(
+        return KanpanicchiPanel(
           latestActivity: _lastClaudeActivity,
           latestNotify: _lastClaudeNotifyEvent,
           onMove: _move,
