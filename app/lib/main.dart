@@ -945,6 +945,10 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
         }
       },
       onError: (_) {
+        // タイムアウト等のエラーで打ち切られた場合も、ここまで認識できていた
+        // 分は失わずに送る（以前はここで結果を送らず無言で捨てていたため、
+        // 話している途中でエラー終了すると入力が消えて見えていた）。
+        _sendMicResultIfAny();
         if (mounted) setState(() => _micListening = false);
       },
     );
@@ -977,7 +981,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       // その場合はOS側の制限が優先される（プラグイン側では回避不可）。
       //
       // listenMode: dictation は confirmation/search 用のモードと違い長文の
-      // 書き取り用。話し始めの頭が切れる問題の軽減を期待して指定。
+      // 書き取り用として指定（※speech_to_textのlistenModeはiOS専用でAndroidの
+      // 挙動には影響しない）。
       listenOptions: SpeechListenOptions(
         localeId: 'ja_JP',
         pauseFor: const Duration(seconds: 3),
@@ -987,8 +992,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     );
   }
 
-  /// マイクの認識結果を1回だけ送信する（onResultのfinalResultと手動停止の
-  /// 両方から呼ばれうるため、二重送信しないよう_micSentでガードする）。
+  /// マイクの認識結果を1回だけ送信する（onResultのfinalResult・onError・
+  /// 手動停止のいずれからも呼ばれうるため、二重送信しないよう_micSentでガードする）。
   void _sendMicResultIfAny() {
     if (_micSent) return;
     _micSent = true;
