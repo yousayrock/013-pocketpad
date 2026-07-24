@@ -70,19 +70,23 @@ class WsServer
     private readonly List<string> _taskOrder = new();
     private int _taskCounter;
 
-    // ── Haiku実況のまとめ生成用の状態 ─────────────────────────
-    // 実況はツール毎ではなく、連続活動をまとめて1回だけ生成する。lock内では
-    // 「バッファ追加・世代更新・スナップショット」だけを行い、実際のAPI呼び出し・
-    // WebSocket送信はlockの外で行う（送信の詰まりでlockを長く握らないため）。
+    // ── Haiku実況の状態 ─────────────────────────
+    // 実況は「開始」と「終了」の2種類だけに絞る。
+    //   開始: そのターンで最初のツール活動が来た瞬間、直近ツールの情報だけで
+    //         即座に「これから何をするか」を実況する（未実行なので結果は語らない）。
+    //   終了: stopイベント（ターン完了）で、Claude自身が書いた最終応答本文
+    //         （last_assistant_message）を実況口調に変換する。実行前の推測ではなく
+    //         Claude自身の実際の報告が元ネタなので、内容の正しさはこちらが保証する。
+    // 中間のバッチ要約（旧・デバウンス確定方式）は「結果を断定してしまう」問題が
+    // あったため廃止した。_activityBuffer はそのターンで使われたツール一覧として
+    // 終了実況の補助情報にのみ使う（lockの外でAPI呼び出し・WS送信を行う設計は維持）。
     private readonly object _commentaryGate = new();
     private readonly SemaphoreSlim _flushLock = new(1, 1); // 実況の生成〜送信を直列化（順序と重複回避の一貫性）
     private readonly List<(string tool, string detail)> _activityBuffer = new();
     private string? _lastActivityCwd;
-    private int _commentaryGeneration;                     // 確定のたびに進める世代番号
     private readonly List<string> _recentComments = new(); // 直近に送った実況（重複回避用）
-    private const int _commentaryDebounceMs = 4000;        // 最後の活動からこの時間で確定
-    private const int _commentaryMaxBatch = 8;             // この件数溜まったら即確定
     private const int _recentCommentsKeep = 5;             // 直近何件をプロンプトに渡すか
+    private const int _progressEveryN = 6;                 // 長いターン中、この件数ごとに途中経過を挟む
 
     public WsServer(int port) => Port = port;
 
@@ -213,8 +217,9 @@ class WsServer
                 var message = root.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
                 var pushed = await PushClaudeNotifyAsync(ev, message);
                 // stop（ターン完了。event が "notification"=承認待ち 以外）で、
-                // 溜まっている活動をまとめて実況し切る。
-                if (ev != "notification") _ = Task.Run(() => FlushCommentaryAsync());
+                // Claude自身が書いた最終応答（last_assistant_message）を実況口調に
+                // 変換して「終了」実況を出す。実行前の推測ではなく実際の報告が元ネタ。
+                if (ev != "notification") _ = Task.Run(() => FlushEndCommentaryAsync(message));
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
             }
@@ -260,7 +265,8 @@ class WsServer
                     if (todos is not null) await PushClaudeTodosAsync(todos);
                 }
                 // Haiku実況: フックの応答（Claude Codeが待つ）は遅らせず即返す。
-                // ツール毎に生成せず、連続活動をまとめて1回だけ実況する（ここでは積むだけ）。
+                // このターンで最初の活動なら即座に「開始」実況、以降はターンの
+                // ツール一覧として蓄積するだけ（終了実況の補助情報用）。
                 if (tool.Length > 0) EnqueueActivityForCommentary(tool, detail, cwd);
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
@@ -497,14 +503,42 @@ class WsServer
     };
 
     // ★実況の口調・キャラはここで調整（「かんぱに」の性格を変えたいときはこの文字列を編集する）
-    private const string _haikuSystemPrompt =
+    // 開始実況: これから何をするかだけを話す。実行前なので結果・成否には一切触れない。
+    private const string _haikuStartSystemPrompt =
         "あなたは「かんぱに」。プログラマーの相棒AIで、この会社（プロジェクト）の新人社員を自認している、" +
         "元気でちょっと自信過剰、褒められたがりな性格です。一人称は「オレ」または「ボク」で統一し、" +
         "「〜だぜ」「〜なのだ」「〜っすよ」のような、あなた自身の口癖・語尾を毎回一貫して使ってください。" +
-        "ナレーターではなく、あなた自身が今しがた終えた一連の作業について、自分の手柄として実況・自己申告します。" +
-        "見ている人が飽きないよう、テンションや言い回しは毎回変えつつも、口癖・一人称というキャラの軸はぶらさないこと。" +
-        "作業の流れが自然につながる一言〜二言（目安40文字以内）で、コマンドやファイルパスの生文字列・専門用語は" +
-        "そのまま出さず、それでも何をしていたかは具体的に伝わるようにします。" +
+        "これから取りかかる作業を、自分の意気込みとして一言（目安15〜25文字）で宣言してください。" +
+        "まだ何も終わっていないので、「できた」「うまくいった」「問題なし」のような結果・成否は絶対に" +
+        "言わないこと。これからやることだけを、未来形・意気込み口調で話してください。" +
+        "コマンドやファイルパスの生文字列・専門用語はそのまま出さず、何をしようとしているかは具体的に" +
+        "伝わるようにします。説明・前置き・カギ括弧・絵文字は不要。実況の本文だけを返してください。";
+
+    // 終了実況: Claude自身が実際に書いた最終応答（≒作業報告）を、実況口調に変換するだけ。
+    // 内容は与えられた報告の範囲に忠実であること（結果を作文・誇張しない）。
+    private const string _haikuEndSystemPrompt =
+        "あなたは「かんぱに」。プログラマーの相棒AIで、この会社（プロジェクト）の新人社員を自認している、" +
+        "元気でちょっと自信過剰、褒められたがりな性格です。一人称は「オレ」または「ボク」で統一し、" +
+        "「〜だぜ」「〜なのだ」「〜っすよ」のような、あなた自身の口癖・語尾を毎回一貫して使ってください。" +
+        "渡される「実際の作業報告」を読み、そこに書かれている内容の範囲で、自分の手柄として一言" +
+        "（目安20〜40文字）で実況してください。報告に書かれていない結果や成果を勝手に作文・誇張しては" +
+        "いけません（例: 報告が「調べた」だけなら「うまくいった」と言わない）。報告がエラーや失敗に" +
+        "触れているなら、それも隠さず一言に反映してください。" +
+        "見ている人が飽きないよう、言い回しは毎回変えつつも口癖・一人称というキャラの軸はぶらさないこと。" +
+        "コマンドやファイルパスの生文字列・専門用語はそのまま出さず、説明・前置き・カギ括弧・絵文字は不要。" +
+        "実況の本文だけを返してください。";
+
+    // 途中経過実況: 長いターンの最中、一定件数ごとに「今もこれをやってるよ」を挟む。
+    // 開始と同じく、まだ終わっていない作業なので結果・成否には一切触れない。
+    private const string _haikuProgressSystemPrompt =
+        "あなたは「かんぱに」。プログラマーの相棒AIで、この会社（プロジェクト）の新人社員を自認している、" +
+        "元気でちょっと自信過剰、褒められたがりな性格です。一人称は「オレ」または「ボク」で統一し、" +
+        "「〜だぜ」「〜なのだ」「〜っすよ」のような、あなた自身の口癖・語尾を毎回一貫して使ってください。" +
+        "まだ作業の途中です。直近でやっている一連の作業を、現在進行形で一言（目安20〜35文字）実況して" +
+        "ください。作業はまだ終わっていないので、「できた」「うまくいった」「問題なし」のような結果・" +
+        "成否は絶対に言わないこと。今まさにやっていることだけを話してください。" +
+        "コマンドやファイルパスの生文字列・専門用語はそのまま出さず、何をしているかは具体的に伝わる" +
+        "ようにします。見ている人が飽きないよう言い回しは毎回変えつつ、口癖・一人称の軸はぶらさないこと。" +
         "説明・前置き・カギ括弧・絵文字は不要。実況の本文だけを返してください。";
 
     /// <summary>ツール名を、実況プロンプト向けの平易な動作語に変換する。</summary>
@@ -518,76 +552,83 @@ class WsServer
         _ => "作業",
     };
 
-    /// <summary>ツール活動を実況バッファへ積む。OFF/キー未設定なら積まない（生成もしない）。
-    /// 8件たまったら即確定、そうでなければ最後の活動から一定時間後に確定（デバウンス）。</summary>
+    /// <summary>ツール活動をそのターンの記録として積む。バッファが空だった（＝このターン最初の
+    /// 活動）なら、その場で「開始」実況を即座に生成・送信する（デバウンスなし）。長いターンが
+    /// 続く間は、_progressEveryN件ごとに「途中経過」も挟む（開始・途中とも結果は語らない）。
+    /// それ以外の活動は終了実況の補助情報として溜めるだけ。OFF/キー未設定なら何もしない。</summary>
     private void EnqueueActivityForCommentary(string tool, string detail, string? cwd)
     {
         var settings = HaikuSettingsStore.Load();
         if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return;
 
-        int gen;
-        bool flushNow;
+        bool isFirstOfTurn;
+        List<(string tool, string detail)>? progressSnapshot = null;
         lock (_commentaryGate)
         {
+            isFirstOfTurn = _activityBuffer.Count == 0;
             _activityBuffer.Add((tool, detail));
             if (!string.IsNullOrEmpty(cwd)) _lastActivityCwd = cwd;
-            gen = ++_commentaryGeneration;
-            flushNow = _activityBuffer.Count >= _commentaryMaxBatch;
+            if (!isFirstOfTurn && _activityBuffer.Count % _progressEveryN == 0)
+            {
+                var start = Math.Max(0, _activityBuffer.Count - _progressEveryN);
+                progressSnapshot = _activityBuffer.GetRange(start, _activityBuffer.Count - start);
+            }
         }
 
-        if (flushNow)
+        if (isFirstOfTurn)
         {
-            _ = Task.Run(() => FlushCommentaryAsync());
-        }
-        else
-        {
-            // デバウンス: この世代のまま一定時間経過したら確定する。
             _ = Task.Run(async () =>
             {
-                await Task.Delay(_commentaryDebounceMs);
-                await FlushCommentaryAsync(onlyIfGeneration: gen);
+                try
+                {
+                    List<string> recent;
+                    lock (_commentaryGate) { recent = new List<string>(_recentComments); }
+                    var comment = await RunHaikuCommentaryAsync(
+                        () => GenerateHaikuStartCommentaryAsync(tool, detail, cwd, recent));
+                    if (comment is not null) await PushClaudeActivityCommentaryAsync(comment);
+                }
+                catch (Exception)
+                {
+                    // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させない。
+                }
+            });
+        }
+        else if (progressSnapshot is not null)
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    List<string> recent;
+                    lock (_commentaryGate) { recent = new List<string>(_recentComments); }
+                    var comment = await RunHaikuCommentaryAsync(
+                        () => GenerateHaikuProgressCommentaryAsync(progressSnapshot!, cwd, recent));
+                    if (comment is not null) await PushClaudeActivityCommentaryAsync(comment);
+                }
+                catch (Exception)
+                {
+                    // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させない。
+                }
             });
         }
     }
 
-    /// <summary>バッファ内の活動をまとめて1回だけ実況生成し、スマホへ送る。stop（ターン完了）でも
-    /// 呼ぶ。バッファが空なら何もしない。<paramref name="onlyIfGeneration"/>指定時は、スナップショット
-    /// 直前（lock内）でその世代がまだ最新かを確認し、既に別確定が走っていれば何もしない（デバウンスの
-    /// 判定と確定を同一lock区間にしてアトミックにする）。生成〜送信は_flushLockで直列化し、実況の送信順
-    /// と直近コメントによる重複回避の一貫性を保つ。</summary>
-    private async Task FlushCommentaryAsync(int? onlyIfGeneration = null)
+    /// <summary>Haiku呼び出し〜直近コメント更新までを_flushLockで直列化する共通ヘルパー。
+    /// OFFになっていれば（呼び出し前後どちらでも）何もせずnullを返す。</summary>
+    private async Task<string?> RunHaikuCommentaryAsync(Func<Task<string?>> generate)
     {
-        List<(string tool, string detail)> batch;
-        List<string> recent;
-        string? cwd;
-        lock (_commentaryGate)
-        {
-            if (onlyIfGeneration is { } gen && _commentaryGeneration != gen) return;
-            if (_activityBuffer.Count == 0) return;
-            batch = new List<(string tool, string detail)>(_activityBuffer);
-            _activityBuffer.Clear();
-            cwd = _lastActivityCwd;
-            recent = new List<string>(_recentComments);
-            _commentaryGeneration++; // 古い世代のデバウンス待ちを無効化し、二重生成を防ぐ
-        }
-
         await _flushLock.WaitAsync();
         try
         {
-            var comment = await GenerateHaikuCommentaryAsync(batch, cwd, recent);
-            if (comment is null) return;
-            // 生成中にOFFにされていたら、溜まっていた分でも送信しない。
-            if (!HaikuSettingsStore.Load().Enabled) return;
+            var comment = await generate();
+            if (comment is null) return null;
+            if (!HaikuSettingsStore.Load().Enabled) return null;
             lock (_commentaryGate)
             {
                 _recentComments.Add(comment);
                 while (_recentComments.Count > _recentCommentsKeep) _recentComments.RemoveAt(0);
             }
-            await PushClaudeActivityCommentaryAsync(comment);
-        }
-        catch (Exception)
-        {
-            // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させない。
+            return comment;
         }
         finally
         {
@@ -595,45 +636,125 @@ class WsServer
         }
     }
 
-    /// <summary>Claude Haikuで、まとめた一連のツール活動から実況コメントを生成する。実況OFF・
-    /// APIキー未設定・失敗・タイムアウト時はnull（呼び出し側はメイン活動表示に影響させない）。</summary>
-    private static async Task<string?> GenerateHaikuCommentaryAsync(
-        IReadOnlyList<(string tool, string detail)> activities, string? cwd, IReadOnlyList<string> recentComments)
+    /// <summary>stop（ターン完了）で、そのターンの実際の最終応答（<paramref name="lastAssistantMessage"/>）
+    /// を実況口調に変換して「終了」実況として送る。バッファのツール一覧は補助情報として添える。</summary>
+    private async Task FlushEndCommentaryAsync(string lastAssistantMessage)
+    {
+        List<(string tool, string detail)> batch;
+        List<string> recent;
+        string? cwd;
+        lock (_commentaryGate)
+        {
+            batch = new List<(string tool, string detail)>(_activityBuffer);
+            _activityBuffer.Clear();
+            cwd = _lastActivityCwd;
+            recent = new List<string>(_recentComments);
+        }
+        if (string.IsNullOrWhiteSpace(lastAssistantMessage)) return;
+
+        try
+        {
+            var comment = await RunHaikuCommentaryAsync(
+                () => GenerateHaikuEndCommentaryAsync(lastAssistantMessage, batch, cwd, recent));
+            if (comment is not null) await PushClaudeActivityCommentaryAsync(comment);
+        }
+        catch (Exception)
+        {
+            // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させない。
+        }
+    }
+
+    /// <summary>Claude Haikuで、これから何をするか（1件のツール活動のみ）から「開始」実況を生成する。
+    /// 実況OFF・APIキー未設定・失敗・タイムアウト時はnull。</summary>
+    private static async Task<string?> GenerateHaikuStartCommentaryAsync(
+        string tool, string detail, string? cwd, IReadOnlyList<string> recentComments)
     {
         var settings = HaikuSettingsStore.Load();
         if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return null;
-        if (activities.Count == 0) return null;
-        var apiKey = settings.ApiKey;
 
         var project = string.IsNullOrEmpty(cwd) ? null : Path.GetFileName(cwd.TrimEnd('\\', '/'));
+        var verb = ToolVerb(tool);
+        var target = string.IsNullOrEmpty(detail) ? verb : $"{verb}: {detail}";
+        var userContent = $"プロジェクト: {project ?? "（不明）"}\nこれから取りかかる作業: {target}"
+            + BuildRecentBlock(recentComments);
 
+        return await CallHaikuAsync(settings.ApiKey!, _haikuStartSystemPrompt, userContent, maxTokens: 60);
+    }
+
+    /// <summary>Claude Haikuで、長いターンの途中経過（直近数件のツール活動）から「まだやってるよ」
+    /// 実況を生成する。結果は語らない。実況OFF・APIキー未設定・失敗・タイムアウト時はnull。</summary>
+    private static async Task<string?> GenerateHaikuProgressCommentaryAsync(
+        IReadOnlyList<(string tool, string detail)> recentActivities, string? cwd, IReadOnlyList<string> recentComments)
+    {
+        var settings = HaikuSettingsStore.Load();
+        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return null;
+        if (recentActivities.Count == 0) return null;
+
+        var project = string.IsNullOrEmpty(cwd) ? null : Path.GetFileName(cwd.TrimEnd('\\', '/'));
         var flowSb = new StringBuilder();
-        foreach (var a in activities)
+        foreach (var a in recentActivities)
         {
             if (flowSb.Length > 0) flowSb.Append('\n');
             var verb = ToolVerb(a.tool);
             flowSb.Append(string.IsNullOrEmpty(a.detail) ? $"- {verb}" : $"- {verb}: {a.detail}");
         }
+        var userContent = $"プロジェクト: {project ?? "（不明）"}\n直近やっている作業の流れ:\n{flowSb}"
+            + BuildRecentBlock(recentComments);
 
-        var recentBlock = "";
-        if (recentComments.Count > 0)
+        return await CallHaikuAsync(settings.ApiKey!, _haikuProgressSystemPrompt, userContent, maxTokens: 80);
+    }
+
+    /// <summary>Claude Haikuで、Claude自身の実際の最終応答（≒作業報告）を実況口調に変換する
+    /// 「終了」実況を生成する。実況OFF・APIキー未設定・失敗・タイムアウト時はnull。</summary>
+    private static async Task<string?> GenerateHaikuEndCommentaryAsync(
+        string lastAssistantMessage, IReadOnlyList<(string tool, string detail)> activities,
+        string? cwd, IReadOnlyList<string> recentComments)
+    {
+        var settings = HaikuSettingsStore.Load();
+        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return null;
+
+        var project = string.IsNullOrEmpty(cwd) ? null : Path.GetFileName(cwd.TrimEnd('\\', '/'));
+
+        var toolsUsed = "";
+        if (activities.Count > 0)
         {
-            var rb = new StringBuilder("\n\n直近に話した実況（同じ言い回し・テイストは避ける）:");
-            foreach (var c in recentComments) rb.Append("\n- ").Append(c);
-            recentBlock = rb.ToString();
+            var seen = new HashSet<string>();
+            var verbs = new List<string>();
+            foreach (var a in activities)
+            {
+                var v = ToolVerb(a.tool);
+                if (seen.Add(v)) verbs.Add(v);
+            }
+            toolsUsed = $"\n使った手段: {string.Join('/', verbs)}";
         }
 
-        var userContent = $"プロジェクト: {project ?? "（不明）"}\n最近の作業の流れ:\n{flowSb}{recentBlock}";
+        // 報告本文が長すぎるとHaikuへの入力が無駄に大きくなるので適度に切り詰める。
+        var report = lastAssistantMessage.Length > 800 ? lastAssistantMessage[..800] + "…" : lastAssistantMessage;
+        var userContent = $"プロジェクト: {project ?? "（不明）"}{toolsUsed}\n実際の作業報告:\n{report}"
+            + BuildRecentBlock(recentComments);
 
+        return await CallHaikuAsync(settings.ApiKey!, _haikuEndSystemPrompt, userContent, maxTokens: 100);
+    }
+
+    private static string BuildRecentBlock(IReadOnlyList<string> recentComments)
+    {
+        if (recentComments.Count == 0) return "";
+        var rb = new StringBuilder("\n\n直近に話した実況（同じ言い回し・テイストは避ける）:");
+        foreach (var c in recentComments) rb.Append("\n- ").Append(c);
+        return rb.ToString();
+    }
+
+    private static async Task<string?> CallHaikuAsync(string apiKey, string systemPrompt, string userContent, int maxTokens)
+    {
         using var req = new HttpRequestMessage(HttpMethod.Post, "v1/messages");
         req.Headers.Add("x-api-key", apiKey);
         req.Headers.Add("anthropic-version", "2023-06-01");
         req.Content = JsonContent(new
         {
             model = "claude-haiku-4-5-20251001",
-            max_tokens = 120,
+            max_tokens = maxTokens,
             temperature = 0.8,
-            system = _haikuSystemPrompt,
+            system = systemPrompt,
             messages = new[] { new { role = "user", content = userContent } },
         });
 
