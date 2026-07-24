@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 
@@ -9,10 +10,56 @@ static class Program
     static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+
+        // 単一インスタンスガード。取得できなければガード入りの別インスタンスが
+        // 生きているので黙って引き下がる。ownedのままApplication.Run終了まで保持する。
+        using var mutex = new Mutex(initiallyOwned: true, @"Global\PocketPadTray", out var isFirst);
+        if (!isFirst) return;
+
+        // ガードの無い古いビルドが残っていたら新しい側から排除する（管理者権限常駐なので可能）。
+        // Kestrelがポート9013を掴む前に解放させる必要があるため server.Start() より先。
+        KillOtherInstances();
+
         var server = new WsServer(port: 9013);
-        server.Start();
+        try
+        {
+            server.Start();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"サーバーを起動できませんでした（ポート{server.Port}が使用中の可能性）。\n" +
+                $"既存のPocketPadTrayや他アプリを終了してから再度起動してください。\n\n{ex.Message}",
+                "PocketPad 起動エラー",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+            return;
+        }
         // --qr: 起動と同時に接続QRを表示（ショートカット用）
         Application.Run(new TrayContext(server, showQr: args.Contains("--qr")));
+        GC.KeepAlive(mutex);
+    }
+
+    private static void KillOtherInstances()
+    {
+        var me = Environment.ProcessId;
+        foreach (var p in Process.GetProcessesByName("PocketPadTray"))
+        {
+            using (p)
+            {
+                if (p.Id == me) continue;
+                try
+                {
+                    p.Kill();
+                    p.WaitForExit(5000);
+                }
+                catch (Exception)
+                {
+                    // 既に終了していた・権限不足等。起動は続行し、ポート衝突なら
+                    // server.Start()の失敗として表面化する。
+                }
+            }
+        }
     }
 }
 
@@ -44,10 +91,14 @@ class TrayContext : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("終了", null, (_, _) => ExitThread());
 
+        // ビルド日時をtooltipに出す（古いバージョンの多重起動を一目で見分けるため）
+        var build = Environment.ProcessPath is { } exe
+            ? File.GetLastWriteTime(exe).ToString("MM/dd HH:mm")
+            : "?";
         _icon = new NotifyIcon
         {
             Icon = IconFactory.CreateAppIcon(),
-            Text = "PocketPad — クリックで接続QRを表示",
+            Text = $"PocketPad ({build}) — クリックでQR表示",
             Visible = true,
             ContextMenuStrip = menu,
         };

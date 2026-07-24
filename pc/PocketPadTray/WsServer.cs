@@ -72,7 +72,10 @@ class WsServer
         _app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(15) });
         _app.Map("/ws", HandleAsync);
         MapDashboard(_app);
-        _ = _app.RunAsync();
+        // bindまで同期で待つ。ポート使用中なら例外をここで飛ばし、呼び出し側
+        // （Program.Main）にエラー表示させる。fire-and-forgetにすると失敗した
+        // 死骸インスタンス（アイコンだけ生存・サーバー無し）ができてしまう。
+        _app.StartAsync().GetAwaiter().GetResult();
     }
 
     // ─────────────────────────── 設定ダッシュボード（HTTP、localhost限定）
