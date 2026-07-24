@@ -108,17 +108,17 @@ const List<Color> kColorPalette = [
 
 // ─────────────────────────────────────── ページ / 下部ボタンの定義
 const kPageNames = {
+  'office': kCharacterName,
   'trackpad': 'トラックパッド',
   'macro': 'マクロ',
   'youtube': 'YouTube',
-  'office': kCharacterName,
 };
 
 const kPageIcons = {
+  'office': Icons.pets,
   'trackpad': Icons.touch_app,
   'macro': Icons.grid_view,
   'youtube': Icons.play_circle_outline,
-  'office': Icons.pets,
 };
 
 const kBottomButtonNames = {

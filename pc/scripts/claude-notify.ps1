@@ -8,6 +8,11 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 try {
+    # [Console]::In は既定だとシステムのレガシーコードページ（日本語環境だとCP932等）
+    # で読むため、Claude CodeがUTF-8で書いてくるフックのJSON（日本語の最終応答等を含む）
+    # を稀に誤読して文字化けさせる（資料室のナレッジに文字化けが記録される不具合として発覚）。
+    # 明示的にUTF-8として読み直す。
+    [Console]::InputEncoding = [System.Text.Encoding]::UTF8
     $raw = [Console]::In.ReadToEnd()
     $payload = $raw | ConvertFrom-Json
 

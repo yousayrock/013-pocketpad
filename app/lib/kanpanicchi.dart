@@ -123,28 +123,28 @@ const _zoneIdle = _Zone(
   Colors.white38,
 );
 const _zoneEditing = _Zone(
-  Alignment(-0.7, -0.6),
+  Alignment(-0.7, -0.8),
   Icons.desktop_windows,
   '編集中',
   '開発デスク',
   Color(0xFF29B6F6),
 );
 const _zoneCommand = _Zone(
-  Alignment(0.7, -0.6),
+  Alignment(0.7, -0.8),
   Icons.terminal,
   'コマンド実行中',
   'サーバー室',
   Color(0xFFB388FF),
 );
 const _zoneSearching = _Zone(
-  Alignment(-0.7, 0.6),
+  Alignment(-0.7, 0.8),
   Icons.menu_book,
   '調査中',
   '資料室',
   Color(0xFFFFC24B),
 );
 const _zoneDelegating = _Zone(
-  Alignment(0.7, 0.6),
+  Alignment(0.7, 0.8),
   Icons.groups,
   '委任中',
   '会議室',
@@ -398,10 +398,14 @@ List<String> _tieredSprite(int level, List<String> base) {
 }
 
 class _PixelSprite extends StatelessWidget {
-  const _PixelSprite({required this.rows, required this.glow});
-  static const pixelSize = 6.0;
+  const _PixelSprite({
+    required this.rows,
+    required this.glow,
+    this.pixelSize = 6.0,
+  });
   final List<String> rows;
   final Color glow;
+  final double pixelSize;
 
   @override
   Widget build(BuildContext context) {
@@ -521,48 +525,52 @@ class _LevelUpBannerState extends State<_LevelUpBanner>
 
   @override
   Widget build(BuildContext context) => Center(
-    child: AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) => Opacity(
-        opacity: _opacity.value,
-        child: Transform.scale(scale: _scale.value, child: child),
-      ),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
-        decoration: BoxDecoration(
-          color: const Color(0xFF0A1020),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: _kAccent, width: 2),
-          boxShadow: [
-            BoxShadow(
-              color: _kAccent.withValues(alpha: 0.5),
-              blurRadius: 30,
-              spreadRadius: 2,
-            ),
-          ],
+    // 一部端末(MediaTek系GPU)でアニメーション中の古いフレームが残る
+    // 描画崩れを防ぐため、バナー全体を独立したレイヤーとして再合成させる。
+    child: RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) => Opacity(
+          opacity: _opacity.value,
+          child: Transform.scale(scale: _scale.value, child: child),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'LEVEL UP!',
-              style: TextStyle(
-                color: _kMagenta,
-                fontWeight: FontWeight.w900,
-                fontSize: 22,
-                letterSpacing: 2,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
+          decoration: BoxDecoration(
+            color: const Color(0xFF0A1020),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: _kAccent, width: 2),
+            boxShadow: [
+              BoxShadow(
+                color: _kAccent.withValues(alpha: 0.5),
+                blurRadius: 30,
+                spreadRadius: 2,
               ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '${widget.name}  Lv.${widget.level} ${widget.rank}',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 18,
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'LEVEL UP!',
+                style: TextStyle(
+                  color: _kMagenta,
+                  fontWeight: FontWeight.w900,
+                  fontSize: 22,
+                  letterSpacing: 2,
+                ),
               ),
-            ),
-          ],
+              const SizedBox(height: 6),
+              Text(
+                '${widget.name}  Lv.${widget.level} ${widget.rank}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     ),
@@ -700,8 +708,7 @@ class _StatsHeader extends StatelessWidget {
                   child: Row(
                     children: [
                       // 名前は自由入力で長くなりうるため横スクロールで見せる。
-                      // Lv./役職はここに同居させると名前の幅を食って見切れてしまうため、
-                      // 経験値バーの下に移動した（下のTextを参照）。
+                      // Lv./役職は常に見えていてほしいのでスクロール対象の外に固定する。
                       Flexible(
                         child: SingleChildScrollView(
                           scrollDirection: Axis.horizontal,
@@ -713,6 +720,14 @@ class _StatsHeader extends StatelessWidget {
                               fontSize: 15,
                             ),
                           ),
+                        ),
+                      ),
+                      Text(
+                        ' Lv.$level $rank',
+                        style: TextStyle(
+                          color: color,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
                         ),
                       ),
                       const SizedBox(width: 4),
@@ -753,20 +768,11 @@ class _StatsHeader extends StatelessWidget {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  'Lv.$level $rank',
-                  style: TextStyle(
-                    color: color,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12,
-                  ),
+                  '$xp/$xpToNext',
+                  style: const TextStyle(color: Colors.white38, fontSize: 11),
                 ),
               ],
             ),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            '$xp/$xpToNext',
-            style: const TextStyle(color: Colors.white38, fontSize: 10),
           ),
         ],
       ),
@@ -1764,27 +1770,30 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                         child: AnimatedAlign(
                                           duration: _moveDuration,
                                           curve: Curves.easeInOut,
-                                          alignment: _zone.align,
+                                          // 部屋カード間の中央の「共有フロア」は実測で幅約43px
+                                          // しかなく、キャラのドット絵は等倍(pixelSize6→42px幅)
+                                          // だとほぼ隙間と同じ幅で、どこに置いても部屋カードに
+                                          // 触れてしまっていた（実機テストで発覚、原因はAlignment
+                                          // の倍率ではなくキャラ自体のサイズだった）。下のPixelSprite
+                                          // でひとまわり小さく描画し、かつ倍率もごく小さくして
+                                          // 常に中央の安全域に収める。
+                                          alignment: Alignment(
+                                            _zone.align.x * 0.05,
+                                            _zone.align.y * 0.05,
+                                          ),
                                           child: AnimatedBuilder(
                                             animation: _bounce,
                                             builder: (context, child) {
                                               final bounceY = _walking
                                                   ? 0.0
                                                   : -_bounce.value * 3;
-                                              // 部屋カードの真上に重ならないよう、部屋の中心から
-                                              // 画面の外側（コーナー側）へずらして隣に立たせる。
-                                              final dx =
-                                                  46.0 *
-                                                  (_zone.align.x >= 0 ? 1 : -1);
-                                              final dy =
-                                                  30.0 *
-                                                  (_zone.align.y >= 0 ? 1 : -1);
                                               return Transform.translate(
-                                                offset: Offset(dx, dy + bounceY),
+                                                offset: Offset(0, bounceY),
                                                 child: child,
                                               );
                                             },
                                             child: _PixelSprite(
+                                              pixelSize: 3.5,
                                               rows: _tieredSprite(
                                                 _level,
                                                 _walking && !_walkFrameA
