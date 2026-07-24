@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'kanpanicchi.dart';
@@ -23,8 +25,37 @@ const kMagenta = Color(0xFFFF006E);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // 今回の大きめの更新（リモート化・資料室ナレッジ等）で予期せぬ例外が起きても
+  // 手がかりゼロにならないよう、未処理エラーをSharedPreferencesへ残す
+  // （新規パッケージを増やさない軽量方針。閲覧UIは今回は作らず、記録だけ先に用意する）。
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    unawaited(logAppError('FlutterError', details.exceptionAsString()));
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    unawaited(logAppError('PlatformDispatcher', error.toString()));
+    return true;
+  };
   initClaudeNotifyService();
   runApp(const PocketPadApp());
+}
+
+const _errorLogPrefsKey = 'error_log';
+const _errorLogMaxEntries = 50;
+
+/// アプリ側の未処理エラーをSharedPreferencesへ記録する（新規パッケージなしの軽量ログ）。
+Future<void> logAppError(String context, String message) async {
+  try {
+    final p = await SharedPreferences.getInstance();
+    final list = p.getStringList(_errorLogPrefsKey) ?? [];
+    list.add('${DateTime.now().toIso8601String()} [$context] $message');
+    while (list.length > _errorLogMaxEntries) {
+      list.removeAt(0);
+    }
+    await p.setStringList(_errorLogPrefsKey, list);
+  } catch (_) {
+    // ロガー自体の失敗は無視（本末転倒になるため）。
+  }
 }
 
 class PocketPadApp extends StatelessWidget {
@@ -49,6 +80,20 @@ class PocketPadApp extends StatelessWidget {
   }
 }
 
+/// host文字列からWebSocket接続先のUriを組み立てる。
+/// "ws://"/"wss://"始まりならリモート想定でそのまま使う（末尾に/wsを補完するだけ）。
+/// それ以外は自宅LAN想定で、従来通りポート9013固定のws://を組み立てる。
+Uri _buildWsUri(String host) {
+  final trimmed = host.trim();
+  if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) {
+    final noSlash = trimmed.endsWith('/')
+        ? trimmed.substring(0, trimmed.length - 1)
+        : trimmed;
+    return Uri.parse(noSlash.endsWith('/ws') ? noSlash : '$noSlash/ws');
+  }
+  return Uri.parse('ws://$trimmed:9013/ws');
+}
+
 // ─────────────────────────────────────── 接続画面
 
 class ConnectScreen extends StatefulWidget {
@@ -59,10 +104,14 @@ class ConnectScreen extends StatefulWidget {
 }
 
 class _ConnectScreenState extends State<ConnectScreen> {
-  final _host = TextEditingController();
+  final _lanHost = TextEditingController();
+  final _remoteHost = TextEditingController();
   final _token = TextEditingController();
+  final _accessClientId = TextEditingController();
+  final _accessClientSecret = TextEditingController();
   bool _busy = false;
   bool _showManual = false;
+  ConnKind _manualKind = ConnKind.lan; // 手動入力欄でどちらのプロファイルを編集中か
   String _status = '';
   bool _autoRetry = true; // 前回PCへ成功するまで自動再接続を続ける
 
@@ -70,11 +119,16 @@ class _ConnectScreenState extends State<ConnectScreen> {
   void initState() {
     super.initState();
     SharedPreferences.getInstance().then((p) {
-      _host.text = p.getString('host') ?? '';
+      // 'host'は旧キー（LAN固定運用時代）。移行のため読めれば使う。
+      _lanHost.text = p.getString('profile_lan_host') ?? p.getString('host') ?? '';
+      _remoteHost.text = p.getString('profile_remote_host') ?? '';
       _token.text = p.getString('token') ?? '';
+      _accessClientId.text = p.getString('access_client_id') ?? '';
+      _accessClientSecret.text = p.getString('access_client_secret') ?? '';
       if (!mounted) return;
       setState(() {});
-      if (_host.text.isNotEmpty && _token.text.isNotEmpty) {
+      if ((_lanHost.text.isNotEmpty || _remoteHost.text.isNotEmpty) &&
+          _token.text.isNotEmpty) {
         _autoConnect(); // 前回のPCへ自動再接続
       } else {
         // 初回はQRスキャンがデフォルト動線
@@ -85,25 +139,47 @@ class _ConnectScreenState extends State<ConnectScreen> {
     });
   }
 
-  /// 前回PCへ、成功するまで数秒ごとに自動再接続を続ける。
+  Map<String, String>? _remoteHeaders() {
+    final id = _accessClientId.text.trim();
+    final secret = _accessClientSecret.text.trim();
+    if (id.isEmpty || secret.isEmpty) return null;
+    return {'CF-Access-Client-Id': id, 'CF-Access-Client-Secret': secret};
+  }
+
+  /// 前回PCへ、成功するまで数秒ごとに自動再接続を続ける。自宅LANを優先し、
+  /// ダメなら外出先プロファイルにフォールバックする。
   /// _busyは立てない（ボタンを殺すとループを止める手段がなくなる）。
   /// QR/手動ボタンを押すと _autoRetry=false で止まる。
   Future<void> _autoConnect() async {
-    while (_autoRetry &&
-        mounted &&
-        _host.text.isNotEmpty &&
-        _token.text.isNotEmpty) {
-      // 1行に収まる長さにする（IPを含めても途中で折り返させない）
-      setState(() => _status = '再接続中…（${_host.text}）');
-      if (await _tryConnect(
-        _host.text,
-        _token.text,
-        const Duration(seconds: 3),
-        auto: true,
-      )) {
-        return; // 成功したらTrackpadScreenへ遷移済み
+    while (_autoRetry && mounted) {
+      if (_lanHost.text.isNotEmpty && _token.text.isNotEmpty) {
+        // 1行に収まる長さにする（IPを含めても途中で折り返させない）
+        setState(() => _status = '再接続中…（自宅LAN: ${_lanHost.text}）');
+        if (await _tryConnect(
+          ConnKind.lan,
+          _lanHost.text,
+          _token.text,
+          const Duration(seconds: 3),
+          auto: true,
+        )) {
+          return; // 成功したらTrackpadScreenへ遷移済み
+        }
+        if (!mounted || !_autoRetry) return;
       }
-      if (!mounted || !_autoRetry) return;
+      if (_remoteHost.text.isNotEmpty && _token.text.isNotEmpty) {
+        setState(() => _status = '再接続中…（外出先）');
+        if (await _tryConnect(
+          ConnKind.remote,
+          _remoteHost.text,
+          _token.text,
+          const Duration(seconds: 5),
+          auto: true,
+          headers: _remoteHeaders(),
+        )) {
+          return;
+        }
+        if (!mounted || !_autoRetry) return;
+      }
       setState(() => _status = '接続待ち…\n下のボタンでいつでも接続し直せます');
       await Future.delayed(const Duration(seconds: 2));
     }
@@ -111,14 +187,21 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   /// 1ホストへの接続試行。成功したらTrackpadScreenへ遷移してtrueを返す。
   /// auto=trueの自動再接続は、ユーザーがQR/手動を選んだ後に成功しても遷移しない。
+  /// headersを渡すとdart:io実装（IOWebSocketChannel）で接続する（Cloudflare Access等の
+  /// 追加ヘッダーが必要な外出先プロファイル用。自宅LANでは通常null）。
   Future<bool> _tryConnect(
+    ConnKind kind,
     String host,
     String token,
     Duration timeout, {
     bool auto = false,
+    Map<String, String>? headers,
   }) async {
     try {
-      final channel = WebSocketChannel.connect(Uri.parse('ws://$host:9013/ws'));
+      final uri = _buildWsUri(host);
+      final WebSocketChannel channel = (headers != null && headers.isNotEmpty)
+          ? IOWebSocketChannel.connect(uri, headers: headers)
+          : WebSocketChannel.connect(uri);
       await channel.ready.timeout(timeout);
 
       final stream = channel.stream.asBroadcastStream();
@@ -146,12 +229,24 @@ class _ConnectScreenState extends State<ConnectScreen> {
         return false;
       }
       final p = await SharedPreferences.getInstance();
-      await p.setString('host', host);
+      if (kind == ConnKind.lan) {
+        await p.setString('profile_lan_host', host);
+      } else {
+        await p.setString('profile_remote_host', host);
+        if (headers != null) {
+          await p.setString('access_client_id', _accessClientId.text.trim());
+          await p.setString(
+            'access_client_secret',
+            _accessClientSecret.text.trim(),
+          );
+        }
+      }
       await p.setString('token', token);
       if (!mounted) return true;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
-          builder: (_) => TrackpadScreen(channel: channel, stream: stream),
+          builder: (_) =>
+              TrackpadScreen(channel: channel, stream: stream, connKind: kind),
         ),
       );
       return true;
@@ -162,16 +257,24 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
   Future<void> _connect() async {
     _autoRetry = false; // 手動接続を選んだので自動リトライは止める
-    final host = _host.text.trim();
+    final host = (_manualKind == ConnKind.lan ? _lanHost : _remoteHost).text
+        .trim();
     final token = _token.text.trim();
     if (host.isEmpty || token.isEmpty) return;
 
     setState(() => _busy = true);
-    final ok = await _tryConnect(host, token, const Duration(seconds: 5));
-    if (!ok) _fail('接続失敗。PC側アプリの起動・IP・トークンを確認してください');
+    final headers = _manualKind == ConnKind.remote ? _remoteHeaders() : null;
+    final ok = await _tryConnect(
+      _manualKind,
+      host,
+      token,
+      const Duration(seconds: 5),
+      headers: headers,
+    );
+    if (!ok) _fail('接続失敗。PC側アプリの起動・IP/URL・トークンを確認してください');
   }
 
-  /// PC画面のQRを読み取り、接続する。
+  /// PC画面のQRを読み取り、接続する（自宅LAN想定）。
   Future<void> _scanQr() async {
     _autoRetry = false; // QRを選んだので自動リトライは止める
     final raw = await Navigator.of(
@@ -187,13 +290,38 @@ class _ConnectScreenState extends State<ConnectScreen> {
     }
     final host = parts[1];
     final token = parts[3];
-    _host.text = host;
+    _lanHost.text = host;
     _token.text = token;
 
     setState(() => _busy = true);
-    if (!await _tryConnect(host, token, const Duration(seconds: 4))) {
+    if (!await _tryConnect(ConnKind.lan, host, token, const Duration(seconds: 4))) {
       _fail('接続できませんでした。PCと同じWiFiにいるか確認してください');
     }
+  }
+
+  Widget _profileChip(String label, ConnKind kind) {
+    final active = _manualKind == kind;
+    return GestureDetector(
+      onTap: () => setState(() => _manualKind = kind),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: active ? kAccent.withValues(alpha: 0.18) : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: active ? kAccent.withValues(alpha: 0.6) : Colors.white24,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: active ? kAccent : Colors.white54,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
   }
 
   void _fail(String msg) {
@@ -312,11 +440,27 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   ),
                   if (_showManual) ...[
                     const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _profileChip('自宅LAN', ConnKind.lan),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: _profileChip('外出先', ConnKind.remote),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
                     TextField(
-                      controller: _host,
-                      decoration: const InputDecoration(
-                        labelText: 'PCのIPアドレス（例: 192.168.1.10）',
-                        border: OutlineInputBorder(),
+                      controller: _manualKind == ConnKind.lan
+                          ? _lanHost
+                          : _remoteHost,
+                      decoration: InputDecoration(
+                        labelText: _manualKind == ConnKind.lan
+                            ? 'PCのIPアドレス（例: 192.168.1.10）'
+                            : 'リモートURL（例: wss://pocketpad.example.com）',
+                        border: const OutlineInputBorder(),
                       ),
                       keyboardType: TextInputType.url,
                     ),
@@ -328,6 +472,25 @@ class _ConnectScreenState extends State<ConnectScreen> {
                         border: OutlineInputBorder(),
                       ),
                     ),
+                    if (_manualKind == ConnKind.remote) ...[
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _accessClientId,
+                        decoration: const InputDecoration(
+                          labelText: 'Cloudflare Access Client ID',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: _accessClientSecret,
+                        decoration: const InputDecoration(
+                          labelText: 'Cloudflare Access Client Secret',
+                          border: OutlineInputBorder(),
+                        ),
+                        obscureText: true,
+                      ),
+                    ],
                     const SizedBox(height: 16),
                     SizedBox(
                       width: double.infinity,
@@ -444,10 +607,14 @@ class TrackpadScreen extends StatefulWidget {
     super.key,
     required this.channel,
     required this.stream,
+    required this.connKind,
   });
 
   final WebSocketChannel channel;
   final Stream<dynamic> stream;
+
+  /// 今の接続経路（自宅LAN/外出先）。かんぱにっちページの隅バッジ表示にのみ使う。
+  final ConnKind connKind;
 
   @override
   State<TrackpadScreen> createState() => _TrackpadScreenState();
@@ -485,6 +652,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
   ClaudeNotifyEvent? _lastClaudeNotifyEvent;
   List<TodoItem> _lastTodos = [];
   ActivityComment? _lastActivityComment;
+  List<KnowledgeEntry> _lastKnowledge = [];
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
   bool _micListening = false;
@@ -532,6 +700,8 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
     // かんぱにっちのTODOも同じ理由でスマホ主導で取りに行く
     // （PCが直近のTodoWrite内容を覚えていれば claude_todos が返る）。
     _sendJson({'type': 'claude_todos_get'});
+    // 資料室のナレッジ（日誌）も同じくスマホ主導で取りに行く。
+    _sendJson({'type': 'claude_knowledge_get'});
   }
 
   /// PCからの受信処理。スクショ結果を受け取ったらプレビュー画面へ。
@@ -602,6 +772,12 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
       final raw = (j['todos'] as List?) ?? const [];
       setState(() => _lastTodos = [
             for (final t in raw) TodoItem.fromJson((t as Map).cast<String, dynamic>()),
+          ]);
+    } else if (j['type'] == 'claude_knowledge') {
+      // claude_todosと同じく、PCから常に全件が送られてくる（差分管理はしない）。
+      final raw = (j['entries'] as List?) ?? const [];
+      setState(() => _lastKnowledge = [
+            for (final e in raw) KnowledgeEntry.fromJson((e as Map).cast<String, dynamic>()),
           ]);
     } else if (j['type'] == 'claude_activity_comment') {
       final text = (j['text'] as String?) ?? '';
@@ -898,7 +1074,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
           latestActivity: _lastClaudeActivity,
           latestNotify: _lastClaudeNotifyEvent,
           todos: _lastTodos,
+          knowledge: _lastKnowledge,
           latestComment: _lastActivityComment,
+          connKind: widget.connKind,
           onMove: _move,
           onScroll: _onScrollDelta,
           onClick: (button, action) =>

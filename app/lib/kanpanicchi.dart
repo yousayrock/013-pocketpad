@@ -15,6 +15,10 @@ const _maxFileTransferBytes = 8 * 1024 * 1024;
 const _kAccent = Color(0xFF00F5FF);
 const _kMagenta = Color(0xFFFF006E);
 
+/// 今の接続経路。自宅LAN(直接ws://)か外出先(Cloudflare Tunnel経由のwss://)か。
+/// 画面隅のバッジ表示に使うだけで、通信自体の分岐は接続確立側(main.dart)で完結している。
+enum ConnKind { lan, remote }
+
 /// 表示名のデフォルト。名前変更ダイアログの4文字制限に収まる長さにしてある
 /// （ユーザーが好きな名前に変えられるので、これはあくまで初期値）。
 const kCharacterName = 'かんぱに';
@@ -66,6 +70,37 @@ class ActivityComment {
 
   final String text;
   final DateTime time;
+}
+
+/// 資料室の日誌1件（`claude_knowledge`）。ターン完了時のClaude自身の最終応答を
+/// そのまま保存したもの。新しいAI要約は行わない軽量方針。
+class KnowledgeEntry {
+  const KnowledgeEntry({
+    required this.project,
+    required this.summary,
+    required this.timestamp,
+    required this.toolsUsed,
+    required this.touchedFiles,
+    this.commitHash,
+  });
+
+  factory KnowledgeEntry.fromJson(Map<String, dynamic> j) => KnowledgeEntry(
+    project: (j['project'] as String?) ?? '(不明)',
+    summary: (j['summary'] as String?) ?? '',
+    timestamp: (j['timestamp'] as String?) ?? '',
+    toolsUsed: [for (final t in (j['toolsUsed'] as List? ?? const [])) t.toString()],
+    touchedFiles: [for (final f in (j['touchedFiles'] as List? ?? const [])) f.toString()],
+    commitHash: j['commitHash'] as String?,
+  );
+
+  final String project;
+  final String summary;
+  final String timestamp; // ISO8601（DateTimeOffset.ToString("O")）
+  final List<String> toolsUsed;
+  final List<String> touchedFiles;
+  final String? commitHash;
+
+  DateTime? get time => DateTime.tryParse(timestamp);
 }
 
 /// オフィス内の「持ち場」。キャラクターがこの位置(Alignment)へ移動する。
@@ -138,6 +173,10 @@ const _zoneWorking = _Zone(
 );
 
 _Zone _zoneFor(String tool) => _zones[tool] ?? _zoneWorking;
+
+/// "HH:mm:ss"形式の時刻表示。実況ログ・部屋詳細・資料室で共通に使う。
+String _fmtTime(DateTime t) =>
+    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:${t.second.toString().padLeft(2, '0')}';
 
 // ─────────────────────────────────────── 育成（レベル/経験値）
 // 「タスクをこなすと経験値が増える」の経験値量。ツール呼び出し1回ごとに少量、
@@ -576,6 +615,39 @@ class _RoomCard extends StatelessWidget {
   }
 }
 
+/// 今の接続経路を示す小さなバッジ（🟢自宅LAN / 🟡外出先）。画面隅に控えめに置くだけ。
+class _ConnKindBadge extends StatelessWidget {
+  const _ConnKindBadge({required this.kind});
+  final ConnKind kind;
+
+  @override
+  Widget build(BuildContext context) {
+    final isLan = kind == ConnKind.lan;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.35),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.circle,
+            size: 8,
+            color: isLan ? Colors.greenAccent : Colors.amberAccent,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            isLan ? 'LAN' : 'リモート',
+            style: const TextStyle(color: Colors.white54, fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// オフィス上部の育成ステータス表示。アバターチップ + レベル/役職 + 経験値バー。
 class _StatsHeader extends StatelessWidget {
   const _StatsHeader({
@@ -628,7 +700,8 @@ class _StatsHeader extends StatelessWidget {
                   child: Row(
                     children: [
                       // 名前は自由入力で長くなりうるため横スクロールで見せる。
-                      // Lv./役職は常に見えていてほしいのでスクロール対象の外に固定する。
+                      // Lv./役職はここに同居させると名前の幅を食って見切れてしまうため、
+                      // 経験値バーの下に移動した（下のTextを参照）。
                       Flexible(
                         child: SingleChildScrollView(
                           scrollDirection: Axis.horizontal,
@@ -640,14 +713,6 @@ class _StatsHeader extends StatelessWidget {
                               fontSize: 15,
                             ),
                           ),
-                        ),
-                      ),
-                      Text(
-                        ' Lv.$level $rank',
-                        style: TextStyle(
-                          color: color,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
                         ),
                       ),
                       const SizedBox(width: 4),
@@ -686,6 +751,15 @@ class _StatsHeader extends StatelessWidget {
                     ),
                   ],
                 ),
+                const SizedBox(height: 3),
+                Text(
+                  'Lv.$level $rank',
+                  style: TextStyle(
+                    color: color,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                  ),
+                ),
               ],
             ),
           ),
@@ -707,6 +781,14 @@ class _TodoPanel extends StatelessWidget {
   final List<TodoItem> todos;
   final Color color;
 
+  // 状態ごとの並び優先度: 実行中 → 未着手 → 完了。完了が下に沈むことで
+  // 「今やっていること／これからやること」が上に残り、スクロールせず一目で分かる。
+  static int _statusRank(String status) => switch (status) {
+    'in_progress' => 0,
+    'completed' => 2,
+    _ => 1,
+  };
+
   @override
   Widget build(BuildContext context) {
     if (todos.isEmpty) {
@@ -718,43 +800,87 @@ class _TodoPanel extends StatelessWidget {
         ),
       );
     }
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: todos.length,
-      itemBuilder: (context, i) {
-        final t = todos[i];
-        final done = t.status == 'completed';
-        final active = t.status == 'in_progress';
-        final icon = done
-            ? Icons.check_circle
-            : active
-            ? Icons.autorenew
-            : Icons.radio_button_unchecked;
-        final iconColor = done ? color : (active ? _kMagenta : Colors.white24);
-        final label = active && t.activeForm.isNotEmpty
-            ? t.activeForm
-            : t.content;
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 5),
+    // 同じ状態内では元の順序を保つ安定ソート（インデックスを二次キーにする）。
+    final ordered = List<TodoItem>.from(todos)..sort(
+      (a, b) {
+        final r = _statusRank(a.status).compareTo(_statusRank(b.status));
+        if (r != 0) return r;
+        return todos.indexOf(a).compareTo(todos.indexOf(b));
+      },
+    );
+    final doneCount = todos.where((t) => t.status == 'completed').length;
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Icon(icon, color: iconColor, size: 18),
-              const SizedBox(width: 8),
               Expanded(
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    color: done ? Colors.white38 : Colors.white70,
-                    fontSize: 13,
-                    decoration: done ? TextDecoration.lineThrough : null,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(3),
+                  child: LinearProgressIndicator(
+                    value: doneCount / todos.length,
+                    minHeight: 4,
+                    backgroundColor: Colors.white12,
+                    valueColor: AlwaysStoppedAnimation<Color>(color),
                   ),
                 ),
               ),
+              const SizedBox(width: 8),
+              Text(
+                '$doneCount/${todos.length}',
+                style: const TextStyle(color: Colors.white38, fontSize: 11),
+              ),
             ],
           ),
-        );
-      },
+        ),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+            itemCount: ordered.length,
+            itemBuilder: (context, i) {
+              final t = ordered[i];
+              final done = t.status == 'completed';
+              final active = t.status == 'in_progress';
+              final icon = done
+                  ? Icons.check_circle
+                  : active
+                  ? Icons.autorenew
+                  : Icons.radio_button_unchecked;
+              final iconColor = done
+                  ? color
+                  : (active ? _kMagenta : Colors.white24);
+              final label = active && t.activeForm.isNotEmpty
+                  ? t.activeForm
+                  : t.content;
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 5),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(icon, color: iconColor, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: TextStyle(
+                          color: done ? Colors.white38 : Colors.white70,
+                          fontSize: 13,
+                          fontWeight: active
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                          decoration: done ? TextDecoration.lineThrough : null,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
     );
   }
 }
@@ -765,9 +891,6 @@ class _CommentaryPanel extends StatelessWidget {
   const _CommentaryPanel({required this.comments, required this.color});
   final List<ActivityComment> comments;
   final Color color;
-
-  String _fmtTime(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:${t.second.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
@@ -821,6 +944,162 @@ class _CommentaryPanel extends StatelessWidget {
   }
 }
 
+/// 資料室のナレッジ棚。ターン完了ごとの日誌をプロジェクト×日付でグループ化して
+/// 新しい順に見せる（新しい要約生成は行わず、既存データを表示側で束ねるだけ）。
+class _KnowledgeShelfPage extends StatelessWidget {
+  const _KnowledgeShelfPage({required this.entries, required this.color});
+  final List<KnowledgeEntry> entries;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final byProject = <String, List<KnowledgeEntry>>{};
+    for (final e in entries) {
+      byProject.putIfAbsent(e.project, () => []).add(e);
+    }
+    for (final list in byProject.values) {
+      list.sort((a, b) => (b.time ?? DateTime(0)).compareTo(a.time ?? DateTime(0)));
+    }
+    final projects = byProject.keys.toList()
+      ..sort((a, b) {
+        final at = byProject[a]!.first.time ?? DateTime(0);
+        final bt = byProject[b]!.first.time ?? DateTime(0);
+        return bt.compareTo(at);
+      });
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF0A1020),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0A1020),
+        foregroundColor: color,
+        title: const Text('資料室 - ナレッジ'),
+      ),
+      body: entries.isEmpty
+          ? const Center(
+              child: Text(
+                'まだ日誌がありません\n作業が一段落するとここに溜まっていきます',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white38, fontSize: 13),
+              ),
+            )
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+              children: [
+                for (final project in projects) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8, bottom: 6),
+                    child: Text(
+                      project,
+                      style: TextStyle(
+                        color: color,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
+                  ),
+                  for (final group in _groupByDate(byProject[project]!)) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6, bottom: 4),
+                      child: Text(
+                        group.dateLabel,
+                        style: const TextStyle(color: Colors.white38, fontSize: 12),
+                      ),
+                    ),
+                    for (final e in group.entries) _KnowledgeCard(entry: e, color: color),
+                  ],
+                  const SizedBox(height: 6),
+                ],
+              ],
+            ),
+    );
+  }
+
+  List<_DateGroup> _groupByDate(List<KnowledgeEntry> list) {
+    final map = <String, List<KnowledgeEntry>>{};
+    final order = <String>[];
+    for (final e in list) {
+      final t = e.time;
+      final key = t == null
+          ? '(日付不明)'
+          : '${t.year}/${t.month.toString().padLeft(2, '0')}/${t.day.toString().padLeft(2, '0')}';
+      if (!map.containsKey(key)) order.add(key);
+      map.putIfAbsent(key, () => []).add(e);
+    }
+    return [for (final k in order) _DateGroup(k, map[k]!)];
+  }
+}
+
+class _DateGroup {
+  _DateGroup(this.dateLabel, this.entries);
+  final String dateLabel;
+  final List<KnowledgeEntry> entries;
+}
+
+/// ナレッジ棚の日誌カード1件。要約本文＋使った手段/触ったファイル/コミットの小さなタグ。
+class _KnowledgeCard extends StatelessWidget {
+  const _KnowledgeCard({required this.entry, required this.color});
+  final KnowledgeEntry entry;
+  final Color color;
+
+  Widget _tag(String text, Color c, {bool mono = false}) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+    decoration: BoxDecoration(
+      color: c.withValues(alpha: 0.12),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Text(
+      text,
+      style: TextStyle(
+        color: c,
+        fontSize: 11,
+        fontFamily: mono ? 'monospace' : null,
+      ),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final t = entry.time;
+    final hasTags = entry.toolsUsed.isNotEmpty ||
+        entry.touchedFiles.isNotEmpty ||
+        entry.commitHash != null;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            entry.summary,
+            style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+          ),
+          if (hasTags) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final tool in entry.toolsUsed) _tag(tool, color),
+                for (final f in entry.touchedFiles.take(6)) _tag(f, Colors.white38, mono: true),
+                if (entry.commitHash != null) _tag(entry.commitHash!, _kAccent, mono: true),
+              ],
+            ),
+          ],
+          if (t != null) ...[
+            const SizedBox(height: 6),
+            Text(_fmtTime(t), style: const TextStyle(color: Colors.white24, fontSize: 11)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 /// 「かんぱにっち」ページ。Claude Codeが今何をしているかをドット絵キャラクターで見せながら、
 /// タスクをこなすたびにユーザーと一緒にレベルアップしていく育成要素つきビューワー。
 /// オフィス内の持ち場（編集/コマンド/調査/委任/待機）を活動に応じて移動する。
@@ -831,7 +1110,9 @@ class KanpanicchiPanel extends StatefulWidget {
     required this.latestActivity,
     required this.latestNotify,
     required this.todos,
+    required this.knowledge,
     required this.latestComment,
+    required this.connKind,
     required this.onMove,
     required this.onScroll,
     required this.onClick,
@@ -842,7 +1123,11 @@ class KanpanicchiPanel extends StatefulWidget {
   final ClaudeActivity? latestActivity;
   final ClaudeNotifyEvent? latestNotify;
   final List<TodoItem> todos;
+  final List<KnowledgeEntry> knowledge;
   final ActivityComment? latestComment;
+
+  /// 今の接続経路（自宅LAN/外出先）。画面隅の小さなバッジ表示にのみ使う。
+  final ConnKind connKind;
   final void Function(double dx, double dy) onMove;
   final void Function(double dy) onScroll;
   final void Function(String button, String action) onClick;
@@ -891,6 +1176,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   // Timer+jumpToだとvsyncと同期せずカクつくため、animateTo（Flutterの
   // アニメーション基盤でティッカー駆動）でループさせる。
   final ScrollController _statusScroll = ScrollController();
+  final PageController _bottomPageController = PageController();
   String? _marqueeLabelSeen;
   int _marqueeGeneration = 0;
   // レベルアップバナーのOverlayEntry（Navigator非経由のため自前で追跡し、
@@ -1145,8 +1431,38 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                 ),
               ),
             ],
+            if (zone == _zoneSearching) ...[
+              const SizedBox(height: 18),
+              const Divider(color: Colors.white12),
+              const SizedBox(height: 6),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: zone.color,
+                    side: BorderSide(color: zone.color.withValues(alpha: 0.5)),
+                  ),
+                  onPressed: () {
+                    Navigator.of(context).pop();
+                    _showKnowledgeShelf(zone);
+                  },
+                  icon: const Icon(Icons.auto_stories),
+                  label: const Text('ナレッジを見る'),
+                ),
+              ),
+            ],
           ],
         ),
+      ),
+    );
+  }
+
+  /// 資料室から呼ぶ、ナレッジ棚（日誌一覧）ページを開く。
+  void _showKnowledgeShelf(_Zone zone) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) =>
+            _KnowledgeShelfPage(entries: widget.knowledge, color: zone.color),
       ),
     );
   }
@@ -1303,6 +1619,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     _blinkTimer?.cancel();
     _marqueeGeneration++; // 実行中のマーキーループを無効化する
     _statusScroll.dispose();
+    _bottomPageController.dispose();
     // 切断等でこのStateが破棄される時、レベルアップ演出中なら先にOverlayEntryを
     // 除去する。放置すると親を失った状態でフレームワークがクラッシュする。
     _levelUpEntry?.remove();
@@ -1339,29 +1656,18 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     }
   }
 
-  String _fmtTime(DateTime t) =>
-      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:${t.second.toString().padLeft(2, '0')}';
-
-  Widget _bottomTabChip(String label, int index) {
+  /// TODO/実況ページのどちらにいるかを示す小さなドット（タップ不要、目印だけ）。
+  Widget _bottomPageDot(int index) {
     final active = _bottomTab == index;
     final color = _status.color;
-    return GestureDetector(
-      onTap: () => setState(() => _bottomTab = index),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        decoration: BoxDecoration(
-          color: active ? color.withValues(alpha: 0.18) : Colors.transparent,
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: active ? color.withValues(alpha: 0.6) : Colors.white24),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: active ? color : Colors.white38,
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      width: active ? 14 : 6,
+      height: 6,
+      margin: const EdgeInsets.symmetric(horizontal: 2),
+      decoration: BoxDecoration(
+        color: active ? color : Colors.white24,
+        borderRadius: BorderRadius.circular(3),
       ),
     );
   }
@@ -1450,40 +1756,45 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                             onTap: () => _showRoomDetail(z),
                                           ),
                                         ),
-                                      // キャラクター本体
-                                      AnimatedAlign(
-                                        duration: _moveDuration,
-                                        curve: Curves.easeInOut,
-                                        alignment: _zone.align,
-                                        child: AnimatedBuilder(
-                                          animation: _bounce,
-                                          builder: (context, child) {
-                                            final bounceY = _walking
-                                                ? 0.0
-                                                : -_bounce.value * 3;
-                                            // 部屋カードの真上に重ならないよう、部屋の中心から
-                                            // 画面の外側（コーナー側）へずらして隣に立たせる。
-                                            final dx =
-                                                46.0 *
-                                                (_zone.align.x >= 0 ? 1 : -1);
-                                            final dy =
-                                                30.0 *
-                                                (_zone.align.y >= 0 ? 1 : -1);
-                                            return Transform.translate(
-                                              offset: Offset(dx, dy + bounceY),
-                                              child: child,
-                                            );
-                                          },
-                                          child: _PixelSprite(
-                                            rows: _tieredSprite(
-                                              _level,
-                                              _walking && !_walkFrameA
-                                                  ? _spriteWalk
-                                                  : (_blinking
-                                                        ? _spriteStandBlink
-                                                        : _spriteStand),
+                                      // キャラクター本体。部屋カード（会議室など）と重なる位置に
+                                      // 来ることがあり、素のままだと上に乗ったキャラがタップを
+                                      // 吸ってしまい部屋カードのInkWellまで届かないことがあるため、
+                                      // キャラ自体はタップを素通しする（操作対象ではないので）。
+                                      IgnorePointer(
+                                        child: AnimatedAlign(
+                                          duration: _moveDuration,
+                                          curve: Curves.easeInOut,
+                                          alignment: _zone.align,
+                                          child: AnimatedBuilder(
+                                            animation: _bounce,
+                                            builder: (context, child) {
+                                              final bounceY = _walking
+                                                  ? 0.0
+                                                  : -_bounce.value * 3;
+                                              // 部屋カードの真上に重ならないよう、部屋の中心から
+                                              // 画面の外側（コーナー側）へずらして隣に立たせる。
+                                              final dx =
+                                                  46.0 *
+                                                  (_zone.align.x >= 0 ? 1 : -1);
+                                              final dy =
+                                                  30.0 *
+                                                  (_zone.align.y >= 0 ? 1 : -1);
+                                              return Transform.translate(
+                                                offset: Offset(dx, dy + bounceY),
+                                                child: child,
+                                              );
+                                            },
+                                            child: _PixelSprite(
+                                              rows: _tieredSprite(
+                                                _level,
+                                                _walking && !_walkFrameA
+                                                    ? _spriteWalk
+                                                    : (_blinking
+                                                          ? _spriteStandBlink
+                                                          : _spriteStand),
+                                              ),
+                                              glow: _status.color,
                                             ),
-                                            glow: _status.color,
                                           ),
                                         ),
                                       ),
@@ -1508,6 +1819,11 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                   onPressed: () =>
                       setState(() => _showTrackpad = !_showTrackpad),
                 ),
+              ),
+              Positioned(
+                top: 8,
+                left: 8,
+                child: _ConnKindBadge(kind: widget.connKind),
               ),
             ],
           ),
@@ -1537,17 +1853,21 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                         ),
                       ),
                     ),
-                    // TODO/実況ログはタップで切り替える（スワイプだと誤操作しやすいため）。
-                    _bottomTabChip('TODO', 0),
-                    const SizedBox(width: 6),
-                    _bottomTabChip('実況', 1),
+                    // TODO/実況ログは下のカラムをどこでも横スワイプすれば切り替わる。
+                    _bottomPageDot(0),
+                    _bottomPageDot(1),
                   ],
                 ),
               ),
               Expanded(
-                child: _bottomTab == 0
-                    ? _TodoPanel(todos: widget.todos, color: _status.color)
-                    : _CommentaryPanel(comments: _commentLog, color: _status.color),
+                child: PageView(
+                  controller: _bottomPageController,
+                  onPageChanged: (i) => setState(() => _bottomTab = i),
+                  children: [
+                    _TodoPanel(todos: widget.todos, color: _status.color),
+                    _CommentaryPanel(comments: _commentLog, color: _status.color),
+                  ],
+                ),
               ),
             ],
           ),

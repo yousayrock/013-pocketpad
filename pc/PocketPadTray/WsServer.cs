@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
@@ -70,6 +71,32 @@ class WsServer
     private readonly List<string> _taskOrder = new();
     private int _taskCounter;
 
+    /// <summary>トレイ再起動をまたいでタスク状態を保つため、%APPDATA%\PocketPad\task_state.jsonから
+    /// 復元する。このプロセスが一度も観測していないtaskIdはそもそも記録が無いため復元できない
+    /// （それ自体は元々の制約のまま）。</summary>
+    private void LoadPersistedTaskState()
+    {
+        var (counter, order, tasks) = TaskStateStore.Load();
+        lock (_taskStateGate)
+        {
+            _taskCounter = counter;
+            _taskOrder.Clear();
+            _taskOrder.AddRange(order);
+            _taskState.Clear();
+            foreach (var t in tasks) _taskState[t.Id] = (t.Content, t.Status, t.ActiveForm);
+        }
+    }
+
+    /// <summary>_taskStateGateを保持した状態で呼ぶこと。</summary>
+    private void PersistTaskStateLocked()
+    {
+        var tasks = _taskOrder
+            .Where(_taskState.ContainsKey)
+            .Select(id => new TaskStateEntry(id, _taskState[id].content, _taskState[id].status, _taskState[id].activeForm))
+            .ToList();
+        TaskStateStore.Save(_taskCounter, new List<string>(_taskOrder), tasks);
+    }
+
     // ── Haiku実況の状態 ─────────────────────────
     // 実況は「開始」と「終了」の2種類だけに絞る。
     //   開始: そのターンで最初のツール活動が来た瞬間、直近ツールの情報だけで
@@ -85,13 +112,15 @@ class WsServer
     private readonly List<(string tool, string detail)> _activityBuffer = new();
     private string? _lastActivityCwd;
     private readonly List<string> _recentComments = new(); // 直近に送った実況（重複回避用）
-    private const int _recentCommentsKeep = 5;             // 直近何件をプロンプトに渡すか
+    private const int _recentCommentsKeep = 20;            // 直近何件をプロンプトに渡すか
     private const int _progressEveryN = 6;                 // 長いターン中、この件数ごとに途中経過を挟む
 
     public WsServer(int port) => Port = port;
 
     public void Start()
     {
+        LoadPersistedTaskState();
+
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
         builder.WebHost.UseKestrel(o => o.ListenAnyIP(Port));
@@ -379,7 +408,8 @@ class WsServer
         }
     }
 
-    /// <summary>_taskStateGateを保持した状態で呼ぶこと。</summary>
+    /// <summary>_taskStateGateを保持した状態で呼ぶこと。呼び出しのたびに現在の状態を
+    /// task_state.jsonへも永続化する（トレイ再起動後も直前の一覧を保つため）。</summary>
     private List<object> SnapshotTodosLocked()
     {
         var result = new List<object>();
@@ -388,6 +418,7 @@ class WsServer
             if (!_taskState.TryGetValue(id, out var t)) continue;
             result.Add(new { content = t.content, status = t.status, activeForm = t.activeForm });
         }
+        PersistTaskStateLocked();
         return result;
     }
 
@@ -496,6 +527,32 @@ class WsServer
         }
     }
 
+    /// <summary>接続中のスマホへ資料室のナレッジ一覧をプッシュ。claude_todosと同じく毎回全件を
+    /// 送る方式（差分管理をせず、常に%APPDATA%\PocketPad\knowledge.jsonの現在の全内容を渡す）。</summary>
+    public async Task<bool> PushClaudeKnowledgeAsync()
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            var entries = KnowledgeStore.Load().Select(e => new
+            {
+                project = e.Project,
+                summary = e.Summary,
+                timestamp = e.Timestamp,
+                toolsUsed = e.ToolsUsed,
+                touchedFiles = e.TouchedFiles,
+                commitHash = e.CommitHash,
+            });
+            await SendJsonAsync(conn, new { type = "claude_knowledge", entries });
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     private static readonly HttpClient _anthropicHttp = new()
     {
         BaseAddress = new Uri("https://api.anthropic.com/"),
@@ -587,9 +644,11 @@ class WsServer
                         () => GenerateHaikuStartCommentaryAsync(tool, detail, cwd, recent));
                     if (comment is not null) await PushClaudeActivityCommentaryAsync(comment);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させない。
+                    // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させないが、
+                    // 後から追えるようログには残す。
+                    ErrorLog.Append("HaikuStartCommentary", ex);
                 }
             });
         }
@@ -605,9 +664,9 @@ class WsServer
                         () => GenerateHaikuProgressCommentaryAsync(progressSnapshot!, cwd, recent));
                     if (comment is not null) await PushClaudeActivityCommentaryAsync(comment);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させない。
+                    ErrorLog.Append("HaikuProgressCommentary", ex);
                 }
             });
         }
@@ -652,15 +711,94 @@ class WsServer
         }
         if (string.IsNullOrWhiteSpace(lastAssistantMessage)) return;
 
+        // 資料室ナレッジ: Haiku実況のON/OFFとは独立に、ターン完了ごとの日誌を常に記録する
+        // （実況は演出のおまけだが、こちらは資料室の本体機能なので設定に関わらず動かす）。
+        RecordKnowledgeEntry(lastAssistantMessage, batch, cwd);
+
         try
         {
             var comment = await RunHaikuCommentaryAsync(
                 () => GenerateHaikuEndCommentaryAsync(lastAssistantMessage, batch, cwd, recent));
             if (comment is not null) await PushClaudeActivityCommentaryAsync(comment);
         }
+        catch (Exception ex)
+        {
+            ErrorLog.Append("HaikuEndCommentary", ex);
+        }
+    }
+
+    /// <summary>ターン完了時の最終応答をそのまま資料室の日誌として1件記録する。新しいAI呼び出しは
+    /// 増やさず、既にこのターンで集めた情報（activities）だけを使う。失敗しても無視する
+    /// （資料室はおまけ機能で、メインのHaiku実況/TODO表示には影響させない）。</summary>
+    private void RecordKnowledgeEntry(
+        string lastAssistantMessage, IReadOnlyList<(string tool, string detail)> activities, string? cwd)
+    {
+        try
+        {
+            var project = string.IsNullOrEmpty(cwd) ? "(不明)" : Path.GetFileName(cwd.TrimEnd('\\', '/'));
+
+            var toolsUsed = new List<string>();
+            var seenTools = new HashSet<string>();
+            var touchedFiles = new List<string>();
+            var seenFiles = new HashSet<string>();
+            var sawGitCommit = false;
+            foreach (var a in activities)
+            {
+                var verb = ToolVerb(a.tool);
+                if (seenTools.Add(verb)) toolsUsed.Add(verb);
+                if (a.tool is "Edit" or "Write" or "NotebookEdit"
+                    && !string.IsNullOrEmpty(a.detail) && seenFiles.Add(a.detail))
+                {
+                    touchedFiles.Add(a.detail);
+                }
+                if (a.tool == "Bash" && a.detail.Contains("git commit")) sawGitCommit = true;
+            }
+            var commitHash = sawGitCommit ? TryGetLatestCommitHash(cwd) : null;
+
+            var entry = new KnowledgeEntry(
+                Project: project ?? "(不明)",
+                Summary: lastAssistantMessage,
+                Timestamp: DateTimeOffset.Now.ToString("O"),
+                ToolsUsed: toolsUsed.ToArray(),
+                TouchedFiles: touchedFiles.ToArray(),
+                CommitHash: commitHash);
+
+            KnowledgeStore.Append(entry);
+            _ = PushClaudeKnowledgeAsync();
+        }
+        catch (Exception ex)
+        {
+            // 資料室はおまけ機能。失敗してもメインのHaiku実況/TODO表示には影響させないが、
+            // 後から追えるようログには残す。
+            ErrorLog.Append("RecordKnowledgeEntry", ex);
+        }
+    }
+
+    /// <summary>git commitコマンドが実行された直後、そのディレクトリのHEADコミットハッシュを
+    /// best-effortで取得する。gitが無い/失敗する等は無視してnullを返す（資料室のおまけ情報のため）。</summary>
+    private static string? TryGetLatestCommitHash(string? cwd)
+    {
+        if (string.IsNullOrEmpty(cwd) || !Directory.Exists(cwd)) return null;
+        try
+        {
+            using var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "rev-parse --short HEAD",
+                WorkingDirectory = cwd,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (proc is null) return null;
+            var output = proc.StandardOutput.ReadToEnd().Trim();
+            proc.WaitForExit(2000);
+            return proc.ExitCode == 0 && output.Length > 0 ? output : null;
+        }
         catch (Exception)
         {
-            // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させない。
+            return null;
         }
     }
 
@@ -970,6 +1108,11 @@ class WsServer
                 {
                     await SendJsonAsync(conn, new { type = "claude_todos", todos = rememberedTodos });
                 }
+                break;
+
+            case "claude_knowledge_get":
+                // 資料室のナレッジ同期（claude_todos_getと同じスマホ主導pull方式）。
+                await PushClaudeKnowledgeAsync();
                 break;
 
             case "config_set":

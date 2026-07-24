@@ -9,6 +9,14 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        // 今回の大きめの更新（リモート化・資料室ナレッジ等）で予期せぬ例外が起きても
+        // サイレントに落ちるだけにならないよう、UIスレッド外/未処理例外をログに残す。
+        Application.ThreadException += (_, e) => ErrorLog.Append("Application.ThreadException", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            if (e.ExceptionObject is Exception ex) ErrorLog.Append("AppDomain.UnhandledException", ex);
+        };
+
         ApplicationConfiguration.Initialize();
 
         // 単一インスタンスガード。取得できなければガード入りの別インスタンスが
@@ -81,6 +89,7 @@ class TrayContext : ApplicationContext
         menu.Items.Add("設定ダッシュボードを開く", null, (_, _) =>
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
                 $"http://localhost:{server.Port}/") { UseShellExecute = true }));
+        menu.Items.Add("エラーログを開く", null, (_, _) => ShowErrorLog());
         menu.Items.Add(new ToolStripSeparator());
         var startupItem = new ToolStripMenuItem("Windows起動時に自動起動")
         {
@@ -133,6 +142,19 @@ class TrayContext : ApplicationContext
         }
         _qrForm = new QrForm(server);
         _qrForm.Show();
+    }
+
+    private static void ShowErrorLog()
+    {
+        var path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "PocketPad", "error.log");
+        if (!File.Exists(path))
+        {
+            MessageBox.Show("エラーログはまだありません。", "PocketPad エラーログ",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
     }
 
     private static void ShowInfo(WsServer server)
