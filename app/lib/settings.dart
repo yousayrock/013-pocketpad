@@ -154,11 +154,11 @@ class ToggleEntry {
 // JSON変換はこちらに置いて循環importを避ける。
 
 Map<String, dynamic> deckButtonToJson(DeckButton b) => {
-      'label': b.label,
-      'icon': iconNameOf(b.icon),
-      'color': b.color.toARGB32(),
-      'message': b.message,
-    };
+  'label': b.label,
+  'icon': iconNameOf(b.icon),
+  'color': b.color.toARGB32(),
+  'message': b.message,
+};
 
 DeckButton deckButtonFromJson(Map<String, dynamic> j) {
   final rawMsg = j['message'];
@@ -206,30 +206,30 @@ class AppSettings {
   static const maxSensitivity = 3.0;
 
   factory AppSettings.defaults() => AppSettings(
-        pages: [for (final id in kPageNames.keys) ToggleEntry(id)],
-        bottomButtons: [
-          for (final id in kBottomButtonNames.keys) ToggleEntry(id)
-        ],
-        sensitivity: 1.4,
-        deck: List.of(defaultDeck),
-      );
+    pages: [for (final id in kPageNames.keys) ToggleEntry(id)],
+    bottomButtons: [for (final id in kBottomButtonNames.keys) ToggleEntry(id)],
+    sensitivity: 1.4,
+    deck: List.of(defaultDeck),
+  );
 
   /// 表示するページID（enabledのみ、順序どおり）。必ず1件以上になる。
-  List<String> get visiblePages =>
-      [for (final p in pages.where((p) => p.enabled)) p.id];
+  List<String> get visiblePages => [
+    for (final p in pages.where((p) => p.enabled)) p.id,
+  ];
 
   /// 表示する下部ボタンID（0件可）。
-  List<String> get enabledBottomButtons =>
-      [for (final b in bottomButtons.where((b) => b.enabled)) b.id];
+  List<String> get enabledBottomButtons => [
+    for (final b in bottomButtons.where((b) => b.enabled)) b.id,
+  ];
 
   Map<String, dynamic> toJson() => {
-        'v': 1,
-        'pages': [for (final p in pages) p.toJson()],
-        'bottomButtons': [for (final b in bottomButtons) b.toJson()],
-        'sensitivity': sensitivity,
-        'deck': [for (final b in deck) deckButtonToJson(b)],
-        'invertScroll': invertScroll,
-      };
+    'v': 1,
+    'pages': [for (final p in pages) p.toJson()],
+    'bottomButtons': [for (final b in bottomButtons) b.toJson()],
+    'sensitivity': sensitivity,
+    'deck': [for (final b in deck) deckButtonToJson(b)],
+    'invertScroll': invertScroll,
+  };
 
   factory AppSettings.fromJson(Map<String, dynamic> j) {
     final s = AppSettings.defaults();
@@ -252,23 +252,45 @@ class AppSettings {
   /// 末尾に追加する（アプリ更新でページ/ボタンが増えても自動で現れる）。
   static List<ToggleEntry> _readEntries(dynamic raw, Iterable<String> known) {
     final result = <ToggleEntry>[];
+    final knownIds = known.toSet();
+    final seenIds = <String>{};
     if (raw is List) {
       for (final e in raw) {
-        if (e is Map && known.contains(e['id'])) {
-          result.add(
-              ToggleEntry(e['id'] as String, enabled: e['enabled'] != false));
+        final id = e is Map ? e['id'] : null;
+        if (id is String && knownIds.contains(id) && seenIds.add(id)) {
+          result.add(ToggleEntry(id, enabled: e['enabled'] != false));
         }
       }
     }
-    for (final id in known) {
-      if (!result.any((r) => r.id == id)) result.add(ToggleEntry(id));
+    for (final id in knownIds) {
+      if (seenIds.add(id)) result.add(ToggleEntry(id));
     }
     return result;
   }
 
   /// 不整合の補正。ページが全部オフなら先頭をオンに戻す。
   void _sanitize() {
+    pages = _deduplicateEntries(pages, kPageNames.keys);
+    bottomButtons = _deduplicateEntries(bottomButtons, kBottomButtonNames.keys);
     if (!pages.any((p) => p.enabled)) pages.first.enabled = true;
+  }
+
+  static List<ToggleEntry> _deduplicateEntries(
+    List<ToggleEntry> entries,
+    Iterable<String> known,
+  ) {
+    final knownIds = known.toSet();
+    final seenIds = <String>{};
+    final result = <ToggleEntry>[];
+    for (final entry in entries) {
+      if (knownIds.contains(entry.id) && seenIds.add(entry.id)) {
+        result.add(entry);
+      }
+    }
+    for (final id in knownIds) {
+      if (seenIds.add(id)) result.add(ToggleEntry(id));
+    }
+    return result;
   }
 
   static Future<AppSettings> load() async {

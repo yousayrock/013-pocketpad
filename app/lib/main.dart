@@ -80,6 +80,15 @@ class PocketPadApp extends StatelessWidget {
   }
 }
 
+/// 接続画面と操作画面は、WebSocket の状態を表す相互排他的なルート。
+/// 通常の MaterialPageRoute の遷移中に再接続が完了すると、旧・新の
+/// TrackpadScreen が同時に描画され得るため、この境界だけは即時に置換する。
+Route<T> _connectionRoute<T>(WidgetBuilder builder) => PageRouteBuilder<T>(
+  pageBuilder: (context, animation, secondaryAnimation) => builder(context),
+  transitionDuration: Duration.zero,
+  reverseTransitionDuration: Duration.zero,
+);
+
 /// host文字列からWebSocket接続先のUriを組み立てる。
 /// "ws://"/"wss://"始まりならリモート想定でそのまま使う（末尾に/wsを補完するだけ）。
 /// それ以外は自宅LAN想定で、従来通りポート9013固定のws://を組み立てる。
@@ -120,7 +129,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
     super.initState();
     SharedPreferences.getInstance().then((p) {
       // 'host'は旧キー（LAN固定運用時代）。移行のため読めれば使う。
-      _lanHost.text = p.getString('profile_lan_host') ?? p.getString('host') ?? '';
+      _lanHost.text =
+          p.getString('profile_lan_host') ?? p.getString('host') ?? '';
       _remoteHost.text = p.getString('profile_remote_host') ?? '';
       _token.text = p.getString('token') ?? '';
       _accessClientId.text = p.getString('access_client_id') ?? '';
@@ -244,8 +254,8 @@ class _ConnectScreenState extends State<ConnectScreen> {
       await p.setString('token', token);
       if (!mounted) return true;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) =>
+        _connectionRoute(
+          (_) =>
               TrackpadScreen(channel: channel, stream: stream, connKind: kind),
         ),
       );
@@ -294,7 +304,12 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _token.text = token;
 
     setState(() => _busy = true);
-    if (!await _tryConnect(ConnKind.lan, host, token, const Duration(seconds: 4))) {
+    if (!await _tryConnect(
+      ConnKind.lan,
+      host,
+      token,
+      const Duration(seconds: 4),
+    )) {
       _fail('接続できませんでした。PCと同じWiFiにいるか確認してください');
     }
   }
@@ -442,13 +457,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        Expanded(
-                          child: _profileChip('自宅LAN', ConnKind.lan),
-                        ),
+                        Expanded(child: _profileChip('自宅LAN', ConnKind.lan)),
                         const SizedBox(width: 8),
-                        Expanded(
-                          child: _profileChip('外出先', ConnKind.remote),
-                        ),
+                        Expanded(child: _profileChip('外出先', ConnKind.remote)),
                       ],
                     ),
                     const SizedBox(height: 16),
@@ -620,7 +631,8 @@ class TrackpadScreen extends StatefulWidget {
   State<TrackpadScreen> createState() => _TrackpadScreenState();
 }
 
-class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObserver {
+class _TrackpadScreenState extends State<TrackpadScreen>
+    with WidgetsBindingObserver {
   // 入力欄の先頭に置く番兵（ゼロ幅スペース）。これが消えた＝空欄で
   // バックスペースが押されたと分かるので、PCへbackspaceを転送する。
   static final _zwsp = String.fromCharCode(0x200B);
@@ -658,6 +670,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
   bool _micListening = false;
   String _micLastWords = '';
   bool _micSent = false;
+  bool _disconnecting = false;
   static const _claudeNotifyPrefsKey = 'claude_notify_enabled';
 
   @override
@@ -666,8 +679,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
     WidgetsBinding.instance.addObserver(this);
     SharedPreferences.getInstance().then((p) {
       if (!mounted) return;
-      setState(() =>
-          _claudeNotifyEnabled = p.getBool(_claudeNotifyPrefsKey) ?? true);
+      setState(
+        () => _claudeNotifyEnabled = p.getBool(_claudeNotifyPrefsKey) ?? true,
+      );
     });
     setupClaudeNotifications().then((_) => startClaudeKeepAliveService());
     _settingsFuture = AppSettings.load();
@@ -753,7 +767,12 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
       final event = (j['event'] as String?) ?? '';
       final message = (j['message'] as String?) ?? '';
       // 「AI社員」ページのアバターにも反映（通知トグルOFFでもページ上の状態は更新する）
-      setState(() => _lastClaudeNotifyEvent = ClaudeNotifyEvent(event: event, message: message));
+      setState(
+        () => _lastClaudeNotifyEvent = ClaudeNotifyEvent(
+          event: event,
+          message: message,
+        ),
+      );
       if (_claudeNotifyEnabled) {
         final foreground =
             WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
@@ -767,18 +786,26 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
     } else if (j['type'] == 'claude_activity') {
       final tool = (j['tool'] as String?) ?? '';
       final detail = (j['detail'] as String?) ?? '';
-      setState(() => _lastClaudeActivity = ClaudeActivity(tool: tool, detail: detail));
+      setState(
+        () => _lastClaudeActivity = ClaudeActivity(tool: tool, detail: detail),
+      );
     } else if (j['type'] == 'claude_todos') {
       final raw = (j['todos'] as List?) ?? const [];
-      setState(() => _lastTodos = [
-            for (final t in raw) TodoItem.fromJson((t as Map).cast<String, dynamic>()),
-          ]);
+      setState(
+        () => _lastTodos = [
+          for (final t in raw)
+            TodoItem.fromJson((t as Map).cast<String, dynamic>()),
+        ],
+      );
     } else if (j['type'] == 'claude_knowledge') {
       // claude_todosと同じく、PCから常に全件が送られてくる（差分管理はしない）。
       final raw = (j['entries'] as List?) ?? const [];
-      setState(() => _lastKnowledge = [
-            for (final e in raw) KnowledgeEntry.fromJson((e as Map).cast<String, dynamic>()),
-          ]);
+      setState(
+        () => _lastKnowledge = [
+          for (final e in raw)
+            KnowledgeEntry.fromJson((e as Map).cast<String, dynamic>()),
+        ],
+      );
     } else if (j['type'] == 'claude_activity_comment') {
       final text = (j['text'] as String?) ?? '';
       if (text.isNotEmpty) {
@@ -787,13 +814,15 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
     } else if (j['type'] == 'file_transfer_result' && mounted) {
       final ok = j['ok'] == true;
       final filename = (j['filename'] as String?) ?? '';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(
-          ok ? 'PCへ送信しました: $filename' : 'PCへの送信に失敗しました',
-          style: TextStyle(color: ok ? kBg : Colors.white),
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            ok ? 'PCへ送信しました: $filename' : 'PCへの送信に失敗しました',
+            style: TextStyle(color: ok ? kBg : Colors.white),
+          ),
+          backgroundColor: ok ? kAccent : kMagenta,
         ),
-        backgroundColor: ok ? kAccent : kMagenta,
-      ));
+      );
     }
   }
 
@@ -805,16 +834,18 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
     entry = OverlayEntry(
-      builder: (context) =>
-          IgnorePointer(child: _ClaudeFlash(color: color, onDone: () => entry.remove())),
+      builder: (context) => IgnorePointer(
+        child: _ClaudeFlash(color: color, onDone: () => entry.remove()),
+      ),
     );
     overlay.insert(entry);
   }
 
   void _setClaudeNotifyEnabled(bool enabled) {
     setState(() => _claudeNotifyEnabled = enabled);
-    SharedPreferences.getInstance()
-        .then((p) => p.setBool(_claudeNotifyPrefsKey, enabled));
+    SharedPreferences.getInstance().then(
+      (p) => p.setBool(_claudeNotifyPrefsKey, enabled),
+    );
   }
 
   /// 現在設定をPCへ送って保存させる（AppSettings.saveのフックからも呼ばれる）。
@@ -822,16 +853,18 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
       _sendJson({'type': 'config_set', 'settings': json});
 
   void _disconnected() {
-    if (!mounted) return;
+    // ping timeout・onDone・onError は同じ切断で続けて発火し得る。
+    // replacement を複数積むと、再接続側の replacement と競合して
+    // 旧・新 TrackpadScreen が同時に残るため、最初の一回だけ処理する。
+    if (!mounted || _disconnecting) return;
+    _disconnecting = true;
     final nav = Navigator.of(context);
     // 切断時にボトムシート・ダイアログ・スクショプレビュー等が開いていると、
     // 土台のルートをpushReplacementで破棄した時に開いていた側が親を失い
     // フレームワークのアサーション（_dependents.isEmpty）でクラッシュする。
     // 先に自分より上のルートをすべて閉じてから接続画面へ差し替える。
     nav.popUntil((route) => route.isFirst);
-    nav.pushReplacement(
-      MaterialPageRoute(builder: (_) => const ConnectScreen()),
-    );
+    nav.pushReplacement(_connectionRoute((_) => const ConnectScreen()));
   }
 
   void _flushMove() {
@@ -1082,8 +1115,11 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
           onClick: (button, action) =>
               _sendJson({'type': 'click', 'button': button, 'action': action}),
           onShortcut: _shortcut,
-          onSendFile: (filename, base64) =>
-              _sendJson({'type': 'file_transfer', 'filename': filename, 'data': base64}),
+          onSendFile: (filename, base64) => _sendJson({
+            'type': 'file_transfer',
+            'filename': filename,
+            'data': base64,
+          }),
         );
       case 'youtube':
         return YoutubePanel(
@@ -1122,8 +1158,11 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
   Widget _bottomBtnById(String id, {required bool expand}) {
     switch (id) {
       case 'enter':
-        return _iconBtn(Icons.keyboard_return, () => _shortcut(['enter']),
-            expand: expand);
+        return _iconBtn(
+          Icons.keyboard_return,
+          () => _shortcut(['enter']),
+          expand: expand,
+        );
       case 'backspace':
         return _backspaceBtn(expand: expand);
       case 'keyboard':
@@ -1133,8 +1172,11 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
           expand: expand,
         );
       case 'alttab':
-        return _iconBtn(Icons.swap_horiz, () => _shortcut(['alt', 'tab']),
-            expand: expand);
+        return _iconBtn(
+          Icons.swap_horiz,
+          () => _shortcut(['alt', 'tab']),
+          expand: expand,
+        );
       case 'win':
         return _iconBtn(Icons.window, () => _shortcut(['win']), expand: expand);
       case 'mic':
@@ -1177,9 +1219,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
     );
     if (!_speechAvailable) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('音声入力を利用できません（マイク権限を確認してください）'),
-        ));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('音声入力を利用できません（マイク権限を確認してください）')),
+        );
       }
       return;
     }
@@ -1225,7 +1267,10 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
       'type': 'macro',
       'steps': [
         {'type': 'text', 'text': _micLastWords},
-        {'type': 'shortcut', 'keys': ['enter']},
+        {
+          'type': 'shortcut',
+          'keys': ['enter'],
+        },
       ],
     });
   }
@@ -1279,11 +1324,17 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
         ),
       ),
     );
-    return expand ? Expanded(child: button) : SizedBox(width: _bottomBtnWidth, child: button);
+    return expand
+        ? Expanded(child: button)
+        : SizedBox(width: _bottomBtnWidth, child: button);
   }
 
-  Widget _iconBtn(IconData icon, VoidCallback onTap,
-      {Color? color, required bool expand}) {
+  Widget _iconBtn(
+    IconData icon,
+    VoidCallback onTap, {
+    Color? color,
+    required bool expand,
+  }) {
     final c = color ?? kAccent;
     final button = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
@@ -1300,7 +1351,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
         child: Icon(icon, size: expand ? 26 : 22),
       ),
     );
-    return expand ? Expanded(child: button) : SizedBox(width: _bottomBtnWidth, child: button);
+    return expand
+        ? Expanded(child: button)
+        : SizedBox(width: _bottomBtnWidth, child: button);
   }
 
   void _sendText() {
@@ -1353,10 +1406,10 @@ class _ClaudeFlashState extends State<_ClaudeFlash>
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-        animation: _opacity,
-        builder: (context, child) =>
-            Container(color: widget.color.withValues(alpha: _opacity.value)),
-      );
+    animation: _opacity,
+    builder: (context, child) =>
+        Container(color: widget.color.withValues(alpha: _opacity.value)),
+  );
 }
 
 // ─────────────────────────────────────── スクショプレビュー画面

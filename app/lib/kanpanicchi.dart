@@ -88,8 +88,12 @@ class KnowledgeEntry {
     project: (j['project'] as String?) ?? '(不明)',
     summary: (j['summary'] as String?) ?? '',
     timestamp: (j['timestamp'] as String?) ?? '',
-    toolsUsed: [for (final t in (j['toolsUsed'] as List? ?? const [])) t.toString()],
-    touchedFiles: [for (final f in (j['touchedFiles'] as List? ?? const [])) f.toString()],
+    toolsUsed: [
+      for (final t in (j['toolsUsed'] as List? ?? const [])) t.toString(),
+    ],
+    touchedFiles: [
+      for (final f in (j['touchedFiles'] as List? ?? const [])) f.toString(),
+    ],
     commitHash: j['commitHash'] as String?,
   );
 
@@ -466,10 +470,10 @@ class _FloorPainter extends CustomPainter {
   bool shouldRepaint(covariant _FloorPainter oldDelegate) => false;
 }
 
-/// レベルアップ時に一瞬だけ出る祝福バナー。main.dartの_ClaudeFlashと同じ
-/// 自己完結OverlayEntry方式（アニメーション終了で自動的に自分を消す）。
+/// レベルアップ時に一瞬だけ出る祝福バナー。
 class _LevelUpBanner extends StatefulWidget {
   const _LevelUpBanner({
+    super.key,
     required this.name,
     required this.level,
     required this.rank,
@@ -525,52 +529,48 @@ class _LevelUpBannerState extends State<_LevelUpBanner>
 
   @override
   Widget build(BuildContext context) => Center(
-    // 一部端末(MediaTek系GPU)でアニメーション中の古いフレームが残る
-    // 描画崩れを防ぐため、バナー全体を独立したレイヤーとして再合成させる。
-    child: RepaintBoundary(
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, child) => Opacity(
-          opacity: _opacity.value,
-          child: Transform.scale(scale: _scale.value, child: child),
+    child: AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) => Opacity(
+        opacity: _opacity.value,
+        child: Transform.scale(scale: _scale.value, child: child),
+      ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0A1020),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: _kAccent, width: 2),
+          boxShadow: [
+            BoxShadow(
+              color: _kAccent.withValues(alpha: 0.5),
+              blurRadius: 30,
+              spreadRadius: 2,
+            ),
+          ],
         ),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
-          decoration: BoxDecoration(
-            color: const Color(0xFF0A1020),
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: _kAccent, width: 2),
-            boxShadow: [
-              BoxShadow(
-                color: _kAccent.withValues(alpha: 0.5),
-                blurRadius: 30,
-                spreadRadius: 2,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'LEVEL UP!',
+              style: TextStyle(
+                color: _kMagenta,
+                fontWeight: FontWeight.w900,
+                fontSize: 22,
+                letterSpacing: 2,
               ),
-            ],
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'LEVEL UP!',
-                style: TextStyle(
-                  color: _kMagenta,
-                  fontWeight: FontWeight.w900,
-                  fontSize: 22,
-                  letterSpacing: 2,
-                ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '${widget.name}  Lv.${widget.level} ${widget.rank}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+                fontSize: 18,
               ),
-              const SizedBox(height: 6),
-              Text(
-                '${widget.name}  Lv.${widget.level} ${widget.rank}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 18,
-                ),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     ),
@@ -807,13 +807,12 @@ class _TodoPanel extends StatelessWidget {
       );
     }
     // 同じ状態内では元の順序を保つ安定ソート（インデックスを二次キーにする）。
-    final ordered = List<TodoItem>.from(todos)..sort(
-      (a, b) {
+    final ordered = List<TodoItem>.from(todos)
+      ..sort((a, b) {
         final r = _statusRank(a.status).compareTo(_statusRank(b.status));
         if (r != 0) return r;
         return todos.indexOf(a).compareTo(todos.indexOf(b));
-      },
-    );
+      });
     final doneCount = todos.where((t) => t.status == 'completed').length;
 
     return Column(
@@ -964,7 +963,9 @@ class _KnowledgeShelfPage extends StatelessWidget {
       byProject.putIfAbsent(e.project, () => []).add(e);
     }
     for (final list in byProject.values) {
-      list.sort((a, b) => (b.time ?? DateTime(0)).compareTo(a.time ?? DateTime(0)));
+      list.sort(
+        (a, b) => (b.time ?? DateTime(0)).compareTo(a.time ?? DateTime(0)),
+      );
     }
     final projects = byProject.keys.toList()
       ..sort((a, b) {
@@ -1008,10 +1009,14 @@ class _KnowledgeShelfPage extends StatelessWidget {
                       padding: const EdgeInsets.only(top: 6, bottom: 4),
                       child: Text(
                         group.dateLabel,
-                        style: const TextStyle(color: Colors.white38, fontSize: 12),
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 12,
+                        ),
                       ),
                     ),
-                    for (final e in group.entries) _KnowledgeCard(entry: e, color: color),
+                    for (final e in group.entries)
+                      _KnowledgeCard(entry: e, color: color),
                   ],
                   const SizedBox(height: 6),
                 ],
@@ -1066,7 +1071,8 @@ class _KnowledgeCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = entry.time;
-    final hasTags = entry.toolsUsed.isNotEmpty ||
+    final hasTags =
+        entry.toolsUsed.isNotEmpty ||
         entry.touchedFiles.isNotEmpty ||
         entry.commitHash != null;
     return Container(
@@ -1082,7 +1088,11 @@ class _KnowledgeCard extends StatelessWidget {
         children: [
           Text(
             entry.summary,
-            style: const TextStyle(color: Colors.white70, fontSize: 13, height: 1.4),
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 13,
+              height: 1.4,
+            ),
           ),
           if (hasTags) ...[
             const SizedBox(height: 8),
@@ -1091,14 +1101,19 @@ class _KnowledgeCard extends StatelessWidget {
               runSpacing: 6,
               children: [
                 for (final tool in entry.toolsUsed) _tag(tool, color),
-                for (final f in entry.touchedFiles.take(6)) _tag(f, Colors.white38, mono: true),
-                if (entry.commitHash != null) _tag(entry.commitHash!, _kAccent, mono: true),
+                for (final f in entry.touchedFiles.take(6))
+                  _tag(f, Colors.white38, mono: true),
+                if (entry.commitHash != null)
+                  _tag(entry.commitHash!, _kAccent, mono: true),
               ],
             ),
           ],
           if (t != null) ...[
             const SizedBox(height: 6),
-            Text(_fmtTime(t), style: const TextStyle(color: Colors.white24, fontSize: 11)),
+            Text(
+              _fmtTime(t),
+              style: const TextStyle(color: Colors.white24, fontSize: 11),
+            ),
           ],
         ],
       ),
@@ -1185,9 +1200,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   final PageController _bottomPageController = PageController();
   String? _marqueeLabelSeen;
   int _marqueeGeneration = 0;
-  // レベルアップバナーのOverlayEntry（Navigator非経由のため自前で追跡し、
-  // このState破棄時に確実に除去する。詳細は _showLevelUpBanner 参照）。
-  OverlayEntry? _levelUpEntry;
+  // レベルアップ演出は外部Overlayへ出さず、このパネルのStack内に描画する。
+  // 一部端末でOverlayの合成レイヤー追加時に旧フレームが縦に残るため。
+  bool _showingLevelUp = false;
+  int _levelUpGeneration = 0;
 
   // ── 育成（レベル/経験値）。永続化キーはshared_preferencesの他設定と同じ
   // プリミティブキー方式（AppSettingsのJSON blobほど複雑な構造ではないため）。
@@ -1315,29 +1331,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   }
 
   void _showLevelUpBanner() {
-    // 切断等でこのStateごとツリーから破棄される時、Navigatorを経由しない
-    // このOverlayEntryは popUntil の対象にならず、後片付けされないまま
-    // 親を失うと _dependents.isEmpty でクラッシュする。dispose() で確実に
-    // 除去できるよう自分でも参照を持つ（連続レベルアップで前のバナーが
-    // 残っていたら、まずそれを消してから新しいバナーを出す）。
-    _levelUpEntry?.remove();
-    final overlay = Overlay.of(context);
-    late OverlayEntry entry;
-    entry = OverlayEntry(
-      builder: (context) => IgnorePointer(
-        child: _LevelUpBanner(
-          name: _displayName,
-          level: _level,
-          rank: _rankFor(_level),
-          onDone: () {
-            entry.remove();
-            if (_levelUpEntry == entry) _levelUpEntry = null;
-          },
-        ),
-      ),
-    );
-    _levelUpEntry = entry;
-    overlay.insert(entry);
+    setState(() {
+      _levelUpGeneration++;
+      _showingLevelUp = true;
+    });
   }
 
   /// 部屋タップ時、その部屋での直近の活動を詳しく見せる（メインの一言は
@@ -1525,7 +1522,11 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   void _onComment(ActivityComment c) {
     _lastActivityLabel = c.text;
     setState(() {
-      _status = _Status(icon: _status.icon, color: _status.color, label: c.text);
+      _status = _Status(
+        icon: _status.icon,
+        color: _status.color,
+        label: c.text,
+      );
       _commentLog.insert(0, c);
       if (_commentLog.length > 30) _commentLog.removeLast();
     });
@@ -1626,10 +1627,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     _marqueeGeneration++; // 実行中のマーキーループを無効化する
     _statusScroll.dispose();
     _bottomPageController.dispose();
-    // 切断等でこのStateが破棄される時、レベルアップ演出中なら先にOverlayEntryを
-    // 除去する。放置すると親を失った状態でフレームワークがクラッシュする。
-    _levelUpEntry?.remove();
-    _levelUpEntry = null;
     super.dispose();
   }
 
@@ -1654,9 +1651,13 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
         duration: Duration(milliseconds: (max * 30).round()), // 秒速約33px
         curve: Curves.linear,
       );
-      if (!mounted || gen != _marqueeGeneration || !_statusScroll.hasClients) return;
+      if (!mounted || gen != _marqueeGeneration || !_statusScroll.hasClients) {
+        return;
+      }
       await Future.delayed(const Duration(milliseconds: 700)); // 末尾で一拍
-      if (!mounted || gen != _marqueeGeneration || !_statusScroll.hasClients) return;
+      if (!mounted || gen != _marqueeGeneration || !_statusScroll.hasClients) {
+        return;
+      }
       _statusScroll.jumpTo(0);
       await Future.delayed(const Duration(milliseconds: 500)); // 先頭でも一拍
     }
@@ -1681,206 +1682,233 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   @override
   Widget build(BuildContext context) {
     _maybeStartMarquee(_status.label);
-    return Column(
+    return Stack(
       children: [
-        Expanded(
-          child: Stack(
+        Positioned.fill(
+          child: Column(
             children: [
-              Positioned.fill(
-                child: _showTrackpad
-                    ? TrackpadArea(
-                        onMove: widget.onMove,
-                        onScroll: widget.onScroll,
-                        onClick: widget.onClick,
-                        onShortcut: widget.onShortcut,
-                        bottomMargin: 4,
-                        child: const Center(
-                          child: Icon(
-                            Icons.touch_app,
-                            color: Colors.white12,
-                            size: 32,
-                          ),
-                        ),
-                      )
-                    // 一部端末(MediaTek系GPU)で、複数アニメーション併用時に古い
-                    // フレームが合成されずそのまま残る描画崩れが再現したため、
-                    // このパネルを独立したレイヤーとして常にフル再合成させる。
-                    : RepaintBoundary(
-                        child: Container(
-                          margin: const EdgeInsets.all(8),
-                          padding: const EdgeInsets.all(3),
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              colors: [
-                                _zone.color.withValues(alpha: 0.4),
-                                Colors.white12,
-                              ],
-                              begin: Alignment.topLeft,
-                              end: Alignment.bottomRight,
-                            ),
-                            borderRadius: BorderRadius.circular(22),
-                          ),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF070B16),
-                              borderRadius: BorderRadius.circular(19),
-                              border: Border.all(color: Colors.white10),
-                            ),
-                            child: Column(
-                              children: [
-                                _StatsHeader(
-                                  name: _displayName,
-                                  level: _level,
-                                  xp: _xp,
-                                  xpToNext: _xpToNext(_level),
-                                  rank: _rankFor(_level),
-                                  color: _status.color,
-                                  onNameTap: _renameCharacter,
+              Expanded(
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: _showTrackpad
+                          ? TrackpadArea(
+                              onMove: widget.onMove,
+                              onScroll: widget.onScroll,
+                              onClick: widget.onClick,
+                              onShortcut: widget.onShortcut,
+                              bottomMargin: 4,
+                              child: const Center(
+                                child: Icon(
+                                  Icons.touch_app,
+                                  color: Colors.white12,
+                                  size: 32,
                                 ),
-                                Expanded(
-                                  child: Stack(
+                              ),
+                            )
+                          // 一部端末(MediaTek系GPU)で、複数アニメーション併用時に古い
+                          // フレームが合成されずそのまま残る描画崩れが再現したため、
+                          // このパネルを独立したレイヤーとして常にフル再合成させる。
+                          : RepaintBoundary(
+                              child: Container(
+                                margin: const EdgeInsets.all(8),
+                                padding: const EdgeInsets.all(3),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [
+                                      _zone.color.withValues(alpha: 0.4),
+                                      Colors.white12,
+                                    ],
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                  ),
+                                  borderRadius: BorderRadius.circular(22),
+                                ),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF070B16),
+                                    borderRadius: BorderRadius.circular(19),
+                                    border: Border.all(color: Colors.white10),
+                                  ),
+                                  child: Column(
                                     children: [
-                                      // たまごっちの筐体っぽい床の質感
-                                      const Center(
-                                        child: SizedBox.expand(
-                                          child: CustomPaint(
-                                            painter: _FloorPainter(),
-                                          ),
-                                        ),
+                                      _StatsHeader(
+                                        name: _displayName,
+                                        level: _level,
+                                        xp: _xp,
+                                        xpToNext: _xpToNext(_level),
+                                        rank: _rankFor(_level),
+                                        color: _status.color,
+                                        onNameTap: _renameCharacter,
                                       ),
-                                      // 各持ち場の部屋カード
-                                      for (final z in {
-                                        _zoneEditing,
-                                        _zoneCommand,
-                                        _zoneSearching,
-                                        _zoneDelegating,
-                                      })
-                                        Align(
-                                          alignment: z.align,
-                                          child: _RoomCard(
-                                            zone: z,
-                                            onTap: () => _showRoomDetail(z),
-                                          ),
-                                        ),
-                                      // キャラクター本体。部屋カード（会議室など）と重なる位置に
-                                      // 来ることがあり、素のままだと上に乗ったキャラがタップを
-                                      // 吸ってしまい部屋カードのInkWellまで届かないことがあるため、
-                                      // キャラ自体はタップを素通しする（操作対象ではないので）。
-                                      IgnorePointer(
-                                        child: AnimatedAlign(
-                                          duration: _moveDuration,
-                                          curve: Curves.easeInOut,
-                                          // 部屋カード間の中央の「共有フロア」は実測で幅約43px
-                                          // しかなく、キャラのドット絵は等倍(pixelSize6→42px幅)
-                                          // だとほぼ隙間と同じ幅で、どこに置いても部屋カードに
-                                          // 触れてしまっていた（実機テストで発覚、原因はAlignment
-                                          // の倍率ではなくキャラ自体のサイズだった）。下のPixelSprite
-                                          // でひとまわり小さく描画し、かつ倍率もごく小さくして
-                                          // 常に中央の安全域に収める。
-                                          alignment: Alignment(
-                                            _zone.align.x * 0.05,
-                                            _zone.align.y * 0.05,
-                                          ),
-                                          child: AnimatedBuilder(
-                                            animation: _bounce,
-                                            builder: (context, child) {
-                                              final bounceY = _walking
-                                                  ? 0.0
-                                                  : -_bounce.value * 3;
-                                              return Transform.translate(
-                                                offset: Offset(0, bounceY),
-                                                child: child,
-                                              );
-                                            },
-                                            child: _PixelSprite(
-                                              pixelSize: 3.5,
-                                              rows: _tieredSprite(
-                                                _level,
-                                                _walking && !_walkFrameA
-                                                    ? _spriteWalk
-                                                    : (_blinking
-                                                          ? _spriteStandBlink
-                                                          : _spriteStand),
+                                      Expanded(
+                                        child: Stack(
+                                          children: [
+                                            // たまごっちの筐体っぽい床の質感
+                                            const Center(
+                                              child: SizedBox.expand(
+                                                child: CustomPaint(
+                                                  painter: _FloorPainter(),
+                                                ),
                                               ),
-                                              glow: _status.color,
                                             ),
-                                          ),
+                                            // 各持ち場の部屋カード
+                                            for (final z in {
+                                              _zoneEditing,
+                                              _zoneCommand,
+                                              _zoneSearching,
+                                              _zoneDelegating,
+                                            })
+                                              Align(
+                                                alignment: z.align,
+                                                child: _RoomCard(
+                                                  zone: z,
+                                                  onTap: () =>
+                                                      _showRoomDetail(z),
+                                                ),
+                                              ),
+                                            // キャラクター本体。部屋カード（会議室など）と重なる位置に
+                                            // 来ることがあり、素のままだと上に乗ったキャラがタップを
+                                            // 吸ってしまい部屋カードのInkWellまで届かないことがあるため、
+                                            // キャラ自体はタップを素通しする（操作対象ではないので）。
+                                            IgnorePointer(
+                                              child: AnimatedAlign(
+                                                duration: _moveDuration,
+                                                curve: Curves.easeInOut,
+                                                // 部屋カード間の中央の「共有フロア」は実測で幅約43px
+                                                // しかなく、キャラのドット絵は等倍(pixelSize6→42px幅)
+                                                // だとほぼ隙間と同じ幅で、どこに置いても部屋カードに
+                                                // 触れてしまっていた（実機テストで発覚、原因はAlignment
+                                                // の倍率ではなくキャラ自体のサイズだった）。下のPixelSprite
+                                                // でひとまわり小さく描画し、かつ倍率もごく小さくして
+                                                // 常に中央の安全域に収める。
+                                                alignment: Alignment(
+                                                  _zone.align.x * 0.05,
+                                                  _zone.align.y * 0.05,
+                                                ),
+                                                child: AnimatedBuilder(
+                                                  animation: _bounce,
+                                                  builder: (context, child) {
+                                                    final bounceY = _walking
+                                                        ? 0.0
+                                                        : -_bounce.value * 3;
+                                                    return Transform.translate(
+                                                      offset: Offset(
+                                                        0,
+                                                        bounceY,
+                                                      ),
+                                                      child: child,
+                                                    );
+                                                  },
+                                                  child: _PixelSprite(
+                                                    pixelSize: 3.5,
+                                                    rows: _tieredSprite(
+                                                      _level,
+                                                      _walking && !_walkFrameA
+                                                          ? _spriteWalk
+                                                          : (_blinking
+                                                                ? _spriteStandBlink
+                                                                : _spriteStand),
+                                                    ),
+                                                    glow: _status.color,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
                                     ],
                                   ),
                                 ),
-                              ],
+                              ),
                             ),
-                          ),
+                    ),
+                    Positioned(
+                      top: 4,
+                      right: 4,
+                      child: IconButton(
+                        icon: Icon(
+                          _showTrackpad ? Icons.smart_toy : Icons.touch_app,
+                          color: Colors.white38,
                         ),
-                      ),
-              ),
-              Positioned(
-                top: 4,
-                right: 4,
-                child: IconButton(
-                  icon: Icon(
-                    _showTrackpad ? Icons.smart_toy : Icons.touch_app,
-                    color: Colors.white38,
-                  ),
-                  tooltip: _showTrackpad ? 'オフィス表示に戻る' : 'トラックパッドを開く',
-                  onPressed: () =>
-                      setState(() => _showTrackpad = !_showTrackpad),
-                ),
-              ),
-              Positioned(
-                top: 8,
-                left: 8,
-                child: _ConnKindBadge(kind: widget.connKind),
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: SingleChildScrollView(
-                        controller: _statusScroll,
-                        scrollDirection: Axis.horizontal,
-                        physics: const NeverScrollableScrollPhysics(),
-                        child: Text(
-                          _status.label,
-                          maxLines: 1,
-                          softWrap: false,
-                          style: TextStyle(
-                            color: _status.color,
-                            fontSize: 14,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
+                        tooltip: _showTrackpad ? 'オフィス表示に戻る' : 'トラックパッドを開く',
+                        onPressed: () =>
+                            setState(() => _showTrackpad = !_showTrackpad),
                       ),
                     ),
-                    // TODO/実況ログは下のカラムをどこでも横スワイプすれば切り替わる。
-                    _bottomPageDot(0),
-                    _bottomPageDot(1),
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: _ConnKindBadge(kind: widget.connKind),
+                    ),
                   ],
                 ),
               ),
               Expanded(
-                child: PageView(
-                  controller: _bottomPageController,
-                  onPageChanged: (i) => setState(() => _bottomTab = i),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _TodoPanel(todos: widget.todos, color: _status.color),
-                    _CommentaryPanel(comments: _commentLog, color: _status.color),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: SingleChildScrollView(
+                              controller: _statusScroll,
+                              scrollDirection: Axis.horizontal,
+                              physics: const NeverScrollableScrollPhysics(),
+                              child: Text(
+                                _status.label,
+                                maxLines: 1,
+                                softWrap: false,
+                                style: TextStyle(
+                                  color: _status.color,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                          // TODO/実況ログは下のカラムをどこでも横スワイプすれば切り替わる。
+                          _bottomPageDot(0),
+                          _bottomPageDot(1),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: PageView(
+                        controller: _bottomPageController,
+                        onPageChanged: (i) => setState(() => _bottomTab = i),
+                        children: [
+                          _TodoPanel(todos: widget.todos, color: _status.color),
+                          _CommentaryPanel(
+                            comments: _commentLog,
+                            color: _status.color,
+                          ),
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
             ],
           ),
         ),
+        if (_showingLevelUp)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: _LevelUpBanner(
+                key: ValueKey(_levelUpGeneration),
+                name: _displayName,
+                level: _level,
+                rank: _rankFor(_level),
+                onDone: () {
+                  if (mounted) setState(() => _showingLevelUp = false);
+                },
+              ),
+            ),
+          ),
       ],
     );
   }
