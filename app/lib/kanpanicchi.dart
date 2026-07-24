@@ -887,6 +887,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   late final AnimationController _bounce;
   Timer? _blinkTimer;
   bool _blinking = false;
+  // ステータス行の文字が長い時、自動で横に流す（ニュースティッカー風）。
+  final ScrollController _statusScroll = ScrollController();
+  Timer? _marqueeTimer;
+  String? _marqueeLabelSeen;
 
   // ── 育成（レベル/経験値）。永続化キーはshared_preferencesの他設定と同じ
   // プリミティブキー方式（AppSettingsのJSON blobほど複雑な構造ではないため）。
@@ -1282,7 +1286,32 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     _walkFrameTimer?.cancel();
     _arriveTimer?.cancel();
     _blinkTimer?.cancel();
+    _marqueeTimer?.cancel();
+    _statusScroll.dispose();
     super.dispose();
+  }
+
+  /// ステータス行の文字がコンテナ幅に収まらない時だけ、自動で横に流し続ける
+  /// （ニュースティッカー風。端まで行ったら先頭に戻ってループ）。
+  void _maybeStartMarquee(String label) {
+    if (_marqueeLabelSeen == label) return;
+    _marqueeLabelSeen = label;
+    _marqueeTimer?.cancel();
+    _marqueeTimer = null;
+    if (_statusScroll.hasClients) _statusScroll.jumpTo(0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_statusScroll.hasClients) return;
+      if (_statusScroll.position.maxScrollExtent <= 0) return; // 収まっているので不要
+      _marqueeTimer = Timer.periodic(const Duration(milliseconds: 40), (timer) {
+        if (!mounted || !_statusScroll.hasClients) {
+          timer.cancel();
+          return;
+        }
+        final pos = _statusScroll.position;
+        final next = pos.pixels + 1.6;
+        _statusScroll.jumpTo(next >= pos.maxScrollExtent ? 0 : next);
+      });
+    });
   }
 
   String _fmtTime(DateTime t) =>
@@ -1314,6 +1343,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
 
   @override
   Widget build(BuildContext context) {
+    _maybeStartMarquee(_status.label);
     return Column(
       children: [
         Expanded(
@@ -1466,14 +1496,19 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                 child: Row(
                   children: [
                     Expanded(
-                      child: Text(
-                        _status.label,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: _status.color,
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
+                      child: SingleChildScrollView(
+                        controller: _statusScroll,
+                        scrollDirection: Axis.horizontal,
+                        physics: const NeverScrollableScrollPhysics(),
+                        child: Text(
+                          _status.label,
+                          maxLines: 1,
+                          softWrap: false,
+                          style: TextStyle(
+                            color: _status.color,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
                     ),
