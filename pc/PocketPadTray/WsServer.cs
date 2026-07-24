@@ -61,6 +61,15 @@ class WsServer
     /// 直後にも最新のTODOをすぐ見せられるよう、authタイミングで自動配信する。</summary>
     private volatile List<object>? _lastTodos;
 
+    // ── TaskCreate/TaskUpdate（TodoWriteの代わりにこの環境で使われるタスクツール）用の状態 ──
+    // TodoWriteは毎回全件を送ってくるが、TaskCreate/TaskUpdateは1件ずつの差分操作かつ、
+    // PreToolUseフックでは実行結果（採番されたtaskId）が見えない。このプロジェクトのtaskIdは
+    // 作成順の連番文字列であるため、TaskCreateの呼び出し順をID採番順とみなしてPC側で複製する。
+    private readonly object _taskStateGate = new();
+    private readonly Dictionary<string, (string content, string status, string activeForm)> _taskState = new();
+    private readonly List<string> _taskOrder = new();
+    private int _taskCounter;
+
     // ── Haiku実況のまとめ生成用の状態 ─────────────────────────
     // 実況はツール毎ではなく、連続活動をまとめて1回だけ生成する。lock内では
     // 「バッファ追加・世代更新・スナップショット」だけを行い、実際のAPI呼び出し・
@@ -241,6 +250,15 @@ class WsServer
                     var todos = ExtractTodos(root);
                     if (todos is not null) await PushClaudeTodosAsync(todos);
                 }
+                else if (tool == "TaskCreate")
+                {
+                    await PushClaudeTodosAsync(ApplyTaskCreate(root));
+                }
+                else if (tool == "TaskUpdate")
+                {
+                    var todos = ApplyTaskUpdate(root);
+                    if (todos is not null) await PushClaudeTodosAsync(todos);
+                }
                 // Haiku実況: フックの応答（Claude Codeが待つ）は遅らせず即返す。
                 // ツール毎に生成せず、連続活動をまとめて1回だけ実況する（ここでは積むだけ）。
                 if (tool.Length > 0) EnqueueActivityForCommentary(tool, detail, cwd);
@@ -301,6 +319,68 @@ class WsServer
                 status = Get("status") ?? "pending",
                 activeForm = Get("activeForm") ?? "",
             });
+        }
+        return result;
+    }
+
+    /// <summary>TaskCreateの呼び出しを、ID採番順とみなしてローカルのタスク状態に追加する。</summary>
+    private List<object> ApplyTaskCreate(JsonElement root)
+    {
+        string? Get(string name) =>
+            root.TryGetProperty("tool_input", out var input) && input.ValueKind == JsonValueKind.Object
+                && input.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String
+                ? v.GetString() : null;
+
+        var subject = Get("subject") ?? "";
+        var activeForm = Get("activeForm") ?? subject;
+
+        lock (_taskStateGate)
+        {
+            var id = (++_taskCounter).ToString();
+            _taskState[id] = (subject, "pending", activeForm);
+            _taskOrder.Add(id);
+            return SnapshotTodosLocked();
+        }
+    }
+
+    /// <summary>TaskUpdateの呼び出しをローカルのタスク状態に反映する。status:"deleted"は一覧から除去。
+    /// このプロセス起動前に作られたtaskId（未知）が来た場合は「不明なタスク」として追加する。</summary>
+    private List<object>? ApplyTaskUpdate(JsonElement root)
+    {
+        if (!root.TryGetProperty("tool_input", out var input) || input.ValueKind != JsonValueKind.Object)
+            return null;
+        string? Get(string name) =>
+            input.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+        var taskId = Get("taskId");
+        if (string.IsNullOrEmpty(taskId)) return null;
+
+        lock (_taskStateGate)
+        {
+            if (Get("status") == "deleted")
+            {
+                _taskState.Remove(taskId);
+                _taskOrder.Remove(taskId);
+                return SnapshotTodosLocked();
+            }
+            if (!_taskState.TryGetValue(taskId, out var cur))
+            {
+                cur = ("(不明なタスク)", "pending", "");
+                _taskOrder.Add(taskId);
+            }
+            _taskState[taskId] = (Get("subject") ?? cur.content, Get("status") ?? cur.status, Get("activeForm") ?? cur.activeForm);
+            return SnapshotTodosLocked();
+        }
+    }
+
+    /// <summary>_taskStateGateを保持した状態で呼ぶこと。</summary>
+    private List<object> SnapshotTodosLocked()
+    {
+        var result = new List<object>();
+        foreach (var id in _taskOrder)
+        {
+            if (!_taskState.TryGetValue(id, out var t)) continue;
+            result.Add(new { content = t.content, status = t.status, activeForm = t.activeForm });
         }
         return result;
     }
