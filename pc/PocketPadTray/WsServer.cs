@@ -1,4 +1,6 @@
 using System.Buffers.Binary;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -54,6 +56,10 @@ class WsServer
     }
 
     public bool ClientConnected => _client is { Ws.State: WebSocketState.Open };
+
+    /// <summary>直近のTodoWrite内容（プロセス生存中のみ保持）。スマホ再起動/再接続
+    /// 直後にも最新のTODOをすぐ見せられるよう、authタイミングで自動配信する。</summary>
+    private volatile List<object>? _lastTodos;
 
     public WsServer(int port) => Port = port;
 
@@ -166,11 +172,29 @@ class WsServer
                 var root = doc.RootElement;
                 var tool = root.TryGetProperty("tool_name", out var toolProp) ? toolProp.GetString() ?? "" : "";
                 var detail = ExtractActivityDetail(tool, root);
+                var cwd = root.TryGetProperty("cwd", out var cwdProp) ? cwdProp.GetString() : null;
                 var pushed = await PushClaudeActivityAsync(tool, detail);
                 if (tool == "TodoWrite")
                 {
                     var todos = ExtractTodos(root);
                     if (todos is not null) await PushClaudeTodosAsync(todos);
+                }
+                // Haiku実況: フックの応答（Claude Codeが待つ）は遅らせず即返す。
+                // 生成できたら数百ms後に別メッセージ(claude_activity_comment)として追って届ける。
+                if (tool.Length > 0)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var comment = await GenerateHaikuCommentaryAsync(tool, detail, cwd);
+                            if (comment is not null) await PushClaudeActivityCommentaryAsync(comment);
+                        }
+                        catch (Exception)
+                        {
+                            // 実況はおまけ機能。失敗してもメインのアクティビティ表示には影響させない。
+                        }
+                    });
                 }
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
@@ -304,9 +328,11 @@ class WsServer
         }
     }
 
-    /// <summary>接続中のスマホへClaude CodeのTODOリスト（TodoWrite）をプッシュ。</summary>
+    /// <summary>接続中のスマホへClaude CodeのTODOリスト（TodoWrite）をプッシュ。
+    /// 次回接続時にも即座に見せられるよう、内容は_lastTodosに覚えておく。</summary>
     public async Task<bool> PushClaudeTodosAsync(List<object> todos)
     {
+        _lastTodos = todos;
         var conn = _client;
         if (conn is not { Ws.State: WebSocketState.Open }) return false;
         try
@@ -318,6 +344,78 @@ class WsServer
         {
             return false;
         }
+    }
+
+    /// <summary>接続中のスマホへHaiku実況コメントをプッシュ。</summary>
+    public async Task<bool> PushClaudeActivityCommentaryAsync(string text)
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            await SendJsonAsync(conn, new { type = "claude_activity_comment", text });
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static readonly HttpClient _anthropicHttp = new()
+    {
+        BaseAddress = new Uri("https://api.anthropic.com/"),
+        Timeout = TimeSpan.FromSeconds(8),
+    };
+
+    private const string _haikuSystemPrompt =
+        "あなたは「かんぱにっち」というゲームのナレーターです。プログラマーの相棒AIが今している作業を、" +
+        "ゲームのステータス表示のようにたった一言で実況してください。専門用語やコマンドの生文字列は使わず、" +
+        "小学生にも伝わる柔らかい日本語で、15〜25文字程度の一文だけを出力してください。" +
+        "説明・前置き・カギ括弧・絵文字は一切不要です。本文の一文のみを返してください。";
+
+    /// <summary>Claude Haikuで、ツール活動の実況コメントを1文生成する。ANTHROPIC_API_KEY未設定・
+    /// 失敗・タイムアウト時はnull（呼び出し側はその場合メインの活動表示に影響させない）。</summary>
+    private static async Task<string?> GenerateHaikuCommentaryAsync(string tool, string detail, string? cwd)
+    {
+        // プロセス環境に無くてもユーザー/マシン環境変数（レジストリ）を直接読む。
+        // トレイは自動起動・手動起動・開発シェル起動など起動経路が多様で、
+        // プロセス環境が古いスナップショットのままのことがあるため。
+        var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
+            ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.User)
+            ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Machine);
+        if (string.IsNullOrEmpty(apiKey)) return null;
+
+        var project = string.IsNullOrEmpty(cwd) ? null : Path.GetFileName(cwd.TrimEnd('\\', '/'));
+        var userContent = $"プロジェクト: {project ?? "（不明）"}\nツール: {tool}\n詳細: {detail}";
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, "v1/messages");
+        req.Headers.Add("x-api-key", apiKey);
+        req.Headers.Add("anthropic-version", "2023-06-01");
+        req.Content = JsonContent(new
+        {
+            model = "claude-haiku-4-5-20251001",
+            max_tokens = 60,
+            temperature = 0.8,
+            system = _haikuSystemPrompt,
+            messages = new[] { new { role = "user", content = userContent } },
+        });
+
+        using var resp = await _anthropicHttp.SendAsync(req);
+        if (!resp.IsSuccessStatusCode) return null;
+
+        using var stream = await resp.Content.ReadAsStreamAsync();
+        using var doc = await JsonDocument.ParseAsync(stream);
+        var content = doc.RootElement.GetProperty("content");
+        if (content.ValueKind != JsonValueKind.Array || content.GetArrayLength() == 0) return null;
+        var text = content[0].TryGetProperty("text", out var t) ? t.GetString() : null;
+        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    }
+
+    private static HttpContent JsonContent(object payload)
+    {
+        var json = JsonSerializer.Serialize(payload);
+        return new StringContent(json, Encoding.UTF8, "application/json");
     }
 
     private async Task HandleAsync(HttpContext ctx)
@@ -507,6 +605,16 @@ class WsServer
                 }
                 break;
 
+            case "claude_todos_get":
+                // かんぱにっちのTODO同期（スマホ主導）。auth直後のPC自発pushだと、
+                // アプリ側がまだstreamのlisten登録を終える前に届いて取りこぼすため、
+                // config_getと同じく「アプリがlisten登録後に取りに来る」方式にする。
+                if (_lastTodos is { } rememberedTodos)
+                {
+                    await SendJsonAsync(conn, new { type = "claude_todos", todos = rememberedTodos });
+                }
+                break;
+
             case "config_set":
                 // スマホの設定をPCへ保存（初回シード／スマホ側での変更）。返信もプッシュもしない
                 if (root.TryGetProperty("settings", out var incoming)
@@ -520,8 +628,61 @@ class WsServer
                 // スマホ側で確認ダイアログを挟んでから送られてくる
                 RunPowerAction(root.TryGetProperty("action", out var pa) ? pa.GetString() ?? "" : "");
                 break;
+
+            case "file_transfer":
+                // かんぱにっちのサーバー室からスマホ→PCへファイルを送る機能。
+                // base64のデコード・ディスクI/Oで受信ループを塞がないようバックグラウンドで実行。
+                if (root.TryGetProperty("filename", out var fnEl) && root.TryGetProperty("data", out var dataEl))
+                {
+                    var filename = fnEl.GetString() ?? "";
+                    var base64 = dataEl.GetString() ?? "";
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var savedName = SaveIncomingFile(filename, base64);
+                            await SendJsonAsync(conn, new { type = "file_transfer_result", ok = true, filename = savedName });
+                        }
+                        catch (Exception)
+                        {
+                            try { await SendJsonAsync(conn, new { type = "file_transfer_result", ok = false }); }
+                            catch (Exception) { /* 送信先ごと死んでいる場合は諦める */ }
+                        }
+                    });
+                }
+                break;
         }
         return authed;
+    }
+
+    private static readonly string _incomingFilesDir = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "PocketPad");
+
+    /// <summary>スマホから受け取ったファイルを Downloads\PocketPad に保存する。
+    /// ファイル名はディレクトリ部分・不正文字を除去してサニタイズし（パストラバーサル対策）、
+    /// 同名ファイルがあれば連番を付けて既存ファイルを上書きしない。</summary>
+    private static string SaveIncomingFile(string filename, string base64)
+    {
+        if (base64.Length > 12 * 1024 * 1024)
+            throw new InvalidOperationException("file too large");
+        var bytes = Convert.FromBase64String(base64);
+
+        var safeName = Path.GetFileName(filename); // ディレクトリ部分（../等）を除去
+        if (string.IsNullOrWhiteSpace(safeName)) safeName = "received_file";
+        foreach (var c in Path.GetInvalidFileNameChars()) safeName = safeName.Replace(c, '_');
+
+        Directory.CreateDirectory(_incomingFilesDir);
+        var dest = Path.Combine(_incomingFilesDir, safeName);
+        var baseName = Path.GetFileNameWithoutExtension(safeName);
+        var ext = Path.GetExtension(safeName);
+        var n = 1;
+        while (File.Exists(dest))
+        {
+            dest = Path.Combine(_incomingFilesDir, $"{baseName} ({n}){ext}");
+            n++;
+        }
+        File.WriteAllBytes(dest, bytes);
+        return Path.GetFileName(dest);
     }
 
     private static void RunPowerAction(string action)

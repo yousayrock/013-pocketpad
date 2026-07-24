@@ -453,7 +453,7 @@ class TrackpadScreen extends StatefulWidget {
   State<TrackpadScreen> createState() => _TrackpadScreenState();
 }
 
-class _TrackpadScreenState extends State<TrackpadScreen> {
+class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObserver {
   // 入力欄の先頭に置く番兵（ゼロ幅スペース）。これが消えた＝空欄で
   // バックスペースが押されたと分かるので、PCへbackspaceを転送する。
   static final _zwsp = String.fromCharCode(0x200B);
@@ -484,6 +484,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   ClaudeActivity? _lastClaudeActivity;
   ClaudeNotifyEvent? _lastClaudeNotifyEvent;
   List<TodoItem> _lastTodos = [];
+  ActivityComment? _lastActivityComment;
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
   bool _micListening = false;
@@ -494,6 +495,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     SharedPreferences.getInstance().then((p) {
       if (!mounted) return;
       setState(() =>
@@ -527,6 +529,9 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     // 設定同期はスマホ主導（listen登録後に送るので応答を取りこぼさない）。
     // PCに保存があれば config、なければ config_request が返る。
     _sendJson({'type': 'config_get'});
+    // かんぱにっちのTODOも同じ理由でスマホ主導で取りに行く
+    // （PCが直近のTodoWrite内容を覚えていれば claude_todos が返る）。
+    _sendJson({'type': 'claude_todos_get'});
   }
 
   /// PCからの受信処理。スクショ結果を受け取ったらプレビュー画面へ。
@@ -598,6 +603,21 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
       setState(() => _lastTodos = [
             for (final t in raw) TodoItem.fromJson((t as Map).cast<String, dynamic>()),
           ]);
+    } else if (j['type'] == 'claude_activity_comment') {
+      final text = (j['text'] as String?) ?? '';
+      if (text.isNotEmpty) {
+        setState(() => _lastActivityComment = ActivityComment(text: text));
+      }
+    } else if (j['type'] == 'file_transfer_result' && mounted) {
+      final ok = j['ok'] == true;
+      final filename = (j['filename'] as String?) ?? '';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+          ok ? 'PCへ送信しました: $filename' : 'PCへの送信に失敗しました',
+          style: TextStyle(color: ok ? kBg : Colors.white),
+        ),
+        backgroundColor: ok ? kAccent : kMagenta,
+      ));
     }
   }
 
@@ -627,9 +647,15 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
 
   void _disconnected() {
     if (!mounted) return;
-    Navigator.of(
-      context,
-    ).pushReplacement(MaterialPageRoute(builder: (_) => const ConnectScreen()));
+    final nav = Navigator.of(context);
+    // 切断時にボトムシート・ダイアログ・スクショプレビュー等が開いていると、
+    // 土台のルートをpushReplacementで破棄した時に開いていた側が親を失い
+    // フレームワークのアサーション（_dependents.isEmpty）でクラッシュする。
+    // 先に自分より上のルートをすべて閉じてから接続画面へ差し替える。
+    nav.popUntil((route) => route.isFirst);
+    nav.pushReplacement(
+      MaterialPageRoute(builder: (_) => const ConnectScreen()),
+    );
   }
 
   void _flushMove() {
@@ -671,6 +697,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _flush?.cancel();
     _ping?.cancel();
     _bsRepeat?.cancel();
@@ -681,6 +708,14 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
     if (_micListening) _speech.stop();
     stopClaudeKeepAliveService();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // ファイルピッカー等の別Activityから戻った直後、この端末のGPUドライバが
+    // 古いフレームを残す描画崩れ（複数アニメーション併用時に再現）を起こすことが
+    // あったため、resumed時に明示的に再描画を要求して上書きさせる。
+    if (state == AppLifecycleState.resumed && mounted) setState(() {});
   }
 
   @override
@@ -863,11 +898,14 @@ class _TrackpadScreenState extends State<TrackpadScreen> {
           latestActivity: _lastClaudeActivity,
           latestNotify: _lastClaudeNotifyEvent,
           todos: _lastTodos,
+          latestComment: _lastActivityComment,
           onMove: _move,
           onScroll: _onScrollDelta,
           onClick: (button, action) =>
               _sendJson({'type': 'click', 'button': button, 'action': action}),
           onShortcut: _shortcut,
+          onSendFile: (filename, base64) =>
+              _sendJson({'type': 'file_transfer', 'filename': filename, 'data': base64}),
         );
       case 'youtube':
         return YoutubePanel(

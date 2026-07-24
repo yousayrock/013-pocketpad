@@ -43,6 +43,13 @@
             android:name="flutterEmbedding"
             android:value="2" />
 
+        <!-- かんぱにっちページで複数アニメーション（XPバー・キャラ移動・瞬き等）が
+             同時に走ると、一部端末のImpeller(Vulkan/GLES)ドライバで古いフレームが
+             残る描画崩れが再現したため、より枯れたSkiaレンダラにフォールバックする。 -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="false" />
+
         <!-- flutter_foreground_task: バックグラウンドでもPC接続とClaude Code通知を維持 -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
