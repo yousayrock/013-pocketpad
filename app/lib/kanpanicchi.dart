@@ -888,9 +888,14 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   Timer? _blinkTimer;
   bool _blinking = false;
   // ステータス行の文字が長い時、自動で横に流す（ニュースティッカー風）。
+  // Timer+jumpToだとvsyncと同期せずカクつくため、animateTo（Flutterの
+  // アニメーション基盤でティッカー駆動）でループさせる。
   final ScrollController _statusScroll = ScrollController();
-  Timer? _marqueeTimer;
   String? _marqueeLabelSeen;
+  int _marqueeGeneration = 0;
+  // レベルアップバナーのOverlayEntry（Navigator非経由のため自前で追跡し、
+  // このState破棄時に確実に除去する。詳細は _showLevelUpBanner 参照）。
+  OverlayEntry? _levelUpEntry;
 
   // ── 育成（レベル/経験値）。永続化キーはshared_preferencesの他設定と同じ
   // プリミティブキー方式（AppSettingsのJSON blobほど複雑な構造ではないため）。
@@ -1018,6 +1023,12 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   }
 
   void _showLevelUpBanner() {
+    // 切断等でこのStateごとツリーから破棄される時、Navigatorを経由しない
+    // このOverlayEntryは popUntil の対象にならず、後片付けされないまま
+    // 親を失うと _dependents.isEmpty でクラッシュする。dispose() で確実に
+    // 除去できるよう自分でも参照を持つ（連続レベルアップで前のバナーが
+    // 残っていたら、まずそれを消してから新しいバナーを出す）。
+    _levelUpEntry?.remove();
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
     entry = OverlayEntry(
@@ -1026,10 +1037,14 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
           name: _displayName,
           level: _level,
           rank: _rankFor(_level),
-          onDone: () => entry.remove(),
+          onDone: () {
+            entry.remove();
+            if (_levelUpEntry == entry) _levelUpEntry = null;
+          },
         ),
       ),
     );
+    _levelUpEntry = entry;
     overlay.insert(entry);
   }
 
@@ -1286,8 +1301,12 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     _walkFrameTimer?.cancel();
     _arriveTimer?.cancel();
     _blinkTimer?.cancel();
-    _marqueeTimer?.cancel();
+    _marqueeGeneration++; // 実行中のマーキーループを無効化する
     _statusScroll.dispose();
+    // 切断等でこのStateが破棄される時、レベルアップ演出中なら先にOverlayEntryを
+    // 除去する。放置すると親を失った状態でフレームワークがクラッシュする。
+    _levelUpEntry?.remove();
+    _levelUpEntry = null;
     super.dispose();
   }
 
@@ -1296,22 +1315,28 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   void _maybeStartMarquee(String label) {
     if (_marqueeLabelSeen == label) return;
     _marqueeLabelSeen = label;
-    _marqueeTimer?.cancel();
-    _marqueeTimer = null;
+    final gen = ++_marqueeGeneration; // 前のラベルのループを無効化する
     if (_statusScroll.hasClients) _statusScroll.jumpTo(0);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_statusScroll.hasClients) return;
-      if (_statusScroll.position.maxScrollExtent <= 0) return; // 収まっているので不要
-      _marqueeTimer = Timer.periodic(const Duration(milliseconds: 40), (timer) {
-        if (!mounted || !_statusScroll.hasClients) {
-          timer.cancel();
-          return;
-        }
-        final pos = _statusScroll.position;
-        final next = pos.pixels + 1.6;
-        _statusScroll.jumpTo(next >= pos.maxScrollExtent ? 0 : next);
-      });
-    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _runMarqueeLoop(gen));
+  }
+
+  /// animateTo（Flutterのアニメーション基盤・vsync同期）でスクロールを流し続ける。
+  /// jumpToを毎フレーム手動で呼ぶ方式だとフレームと同期せずカクつくため使わない。
+  Future<void> _runMarqueeLoop(int gen) async {
+    while (mounted && gen == _marqueeGeneration && _statusScroll.hasClients) {
+      final max = _statusScroll.position.maxScrollExtent;
+      if (max <= 0) return; // 収まっているので不要
+      await _statusScroll.animateTo(
+        max,
+        duration: Duration(milliseconds: (max * 30).round()), // 秒速約33px
+        curve: Curves.linear,
+      );
+      if (!mounted || gen != _marqueeGeneration || !_statusScroll.hasClients) return;
+      await Future.delayed(const Duration(milliseconds: 700)); // 末尾で一拍
+      if (!mounted || gen != _marqueeGeneration || !_statusScroll.hasClients) return;
+      _statusScroll.jumpTo(0);
+      await Future.delayed(const Duration(milliseconds: 500)); // 先頭でも一拍
+    }
   }
 
   String _fmtTime(DateTime t) =>
