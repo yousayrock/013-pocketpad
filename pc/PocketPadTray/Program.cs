@@ -88,6 +88,17 @@ class TrayContext : ApplicationContext
         };
         startupItem.Click += (_, _) => startupItem.Checked = Startup.Toggle();
         menu.Items.Add(startupItem);
+        var haikuItem = new ToolStripMenuItem("Haiku実況を有効にする")
+        {
+            Checked = HaikuSettingsStore.Load().Enabled,
+        };
+        haikuItem.Click += (_, _) =>
+        {
+            var cur = HaikuSettingsStore.Load();
+            HaikuSettingsStore.Save(!cur.Enabled, null);
+            haikuItem.Checked = !cur.Enabled;
+        };
+        menu.Items.Add(haikuItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("終了", null, (_, _) => ExitThread());
 

@@ -3,7 +3,10 @@
 > 2026-07-24 のセッション終了時点の引き継ぎ。追記: 同日午後、トレイの多重起動バグを
 > 修正済み（コミット a2db33a — 名前付きMutexで単一インスタンス化、起動時に古い
 > インスタンスを自動Kill、ポート9013のbind失敗をエラーダイアログ化、tooltipに
-> ビルド日時表示）。古い世代のexe（bin/Release/.../win-x64, publish）は削除済み。実装済みの全体像は `docs/protocol.md` と
+> ビルド日時表示）。古い世代のexe（bin/Release/.../win-x64, publish）は削除済み。
+> 追記2: 同日、Haiku実況のAPIキーをUser環境変数からトレイ専用のDPAPI暗号化
+> ローカル設定ファイルへ移行し、ON/OFFトグルを追加（下記「4. Haiku実況の運用改善」参照）。
+> ユーザー環境変数`ANTHROPIC_API_KEY`起因の誤課金インシデントを受けての対応。実装済みの全体像は `docs/protocol.md` と
 > 本ドキュメント末尾の「今回やったこと」を参照。リモート化の大型仕様は
 > `docs/spec-remote-kanpanicchi.md`（クロ作・別立て）にあり、本メモとは独立。
 
@@ -26,11 +29,21 @@ Align の子サイズ差の影響を受けるため、部屋ごとに個別オ�
 表示されていたことが1回あった。再現条件未特定。`_bottomTab` は未永続化。
 
 ### 4. Haiku実況の運用改善
-- 実況は**ツール呼び出し1回ごとにHaiku APIを1回**叩く（PC側 `GenerateHaikuCommentaryAsync`）。
-  コストは軽微だが、設定でON/OFFできるようにすると安心（トレイメニュー or ダッシュボード）。
-- 実況ログ（`_commentLog`、最大30件）はアプリ内メモリのみ。再起動で消える。
+- **[対応済み 2026-07-24]** APIキー管理: `ANTHROPIC_API_KEY`のUser環境変数運用を廃止し、
+  トレイ専用のローカル設定ファイル（`%APPDATA%\PocketPad\haiku_settings.json`、DPAPI暗号化）に
+  移行した。理由: User環境変数だとPC上の全ターミナルの`claude` CLIにも波及し、サブスク経由の
+  はずの利用がAPI従量課金に切り替わって高額請求が発生するインシデントがあったため。
+  新規 `HaikuSettingsStore.cs` が読み書きを担当し、`GenerateHaikuCommentaryAsync`は
+  そこから読む形に変更済み（`WsServer.cs`）。
+- **[対応済み 2026-07-24]** ON/OFFトグルを追加。トレイのコンテキストメニュー
+  （「Haiku実況を有効にする」）とダッシュボード（`/api/haiku-settings`、
+  `dashboard.html`の「Haiku実況」セクション）の両方から切り替え可能。
+  OFF時はAnthropic APIへのリクエスト自体が発生しない。
+- 移行手順（未実施ならユーザー側で対応要）: ①ダッシュボードでキーを再設定・ON確認
+  →②既存のUserスコープ`ANTHROPIC_API_KEY`環境変数を削除→③（推奨）実況専用の
+  別APIキーをAnthropicコンソールで発行しSpend Limitを設定した上でそちらに差し替え。
+- 実況ログ（`_commentLog`、最大30件）はアプリ内メモリのみ。再起動で消える（**未対応**）。
   TODOと同じくPC側で覚えて `_get` で復元する手もある。
-- APIキーはユーザー環境変数 `ANTHROPIC_API_KEY`（プロセス→User→Machine の順でフォールバック読込）。
 
 ### 5. クロの仕様書（docs/spec-remote-kanpanicchi.md）
 Cloudflare Tunnelでのリモート化（Phase1）→ FCMプッシュ（Phase2）→ 資料室ナレッジ化（Phase3）。

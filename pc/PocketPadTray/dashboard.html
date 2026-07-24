@@ -124,6 +124,23 @@ label.fld > * { margin-top: 4px; }
 </div></header>
 
 <div class="wrap">
+  <section id="haikuSection">
+    <h2>Haiku実況</h2>
+    <div class="row">
+      <span class="name">実況を有効にする</span>
+      <label class="switch">
+        <input type="checkbox" id="haikuEnabled">
+        <span></span>
+      </label>
+    </div>
+    <label class="fld">
+      Anthropic APIキー
+      <input type="password" id="haikuApiKey" autocomplete="off">
+    </label>
+    <div class="add-bar">
+      <button id="haikuSaveBtn" class="primary">保存</button>
+    </div>
+  </section>
   <div id="waiting">設定を読み込み中…<br><br>
     <span style="font-size:12px">初回はスマホを一度PCに接続すると設定が同期され、ここで編集できるようになります。</span>
   </div>
@@ -687,8 +704,37 @@ async function pollStatus() {
   }
 }
 
+// ─────────────────────────── Haiku実況設定（スマホ同期のcfgとは無関係、独立して読み書きする）
+async function loadHaikuSettings() {
+  try {
+    const r = await fetch("/api/haiku-settings");
+    const s = await r.json();
+    $("haikuEnabled").checked = !!s.enabled;
+    $("haikuApiKey").placeholder = s.hasKey ? "設定済み（変更する場合のみ入力）" : "未設定";
+  } catch {
+    // トレイアプリ未起動時など。何もしない（値は既定のまま）
+  }
+}
+
+async function saveHaikuSettings() {
+  const body = { enabled: $("haikuEnabled").checked };
+  const key = $("haikuApiKey").value.trim();
+  if (key) body.apiKey = key;
+  try {
+    const r = await fetch("/api/haiku-settings", { method: "PUT", body: JSON.stringify(body) });
+    if (!r.ok) { toast("保存に失敗しました: " + await r.text()); return; }
+    $("haikuApiKey").value = "";
+    toast("Haiku実況の設定を保存しました");
+    loadHaikuSettings();
+  } catch {
+    toast("保存に失敗しました（PocketPadTrayは起動していますか？）");
+  }
+}
+
 // ─────────────────────────── 起動
 $("saveBtn").onclick = save;
+$("haikuSaveBtn").onclick = saveHaikuSettings;
+loadHaikuSettings();
 $("reloadBtn").onclick = async () => {
   if (dirty && !confirm("未保存の変更があります。破棄して読み直しますか？")) return;
   if (await loadConfig()) toast("読み直しました");

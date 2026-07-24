@@ -132,6 +132,48 @@ class WsServer
             await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { connected = ClientConnected }));
         });
 
+        // Haiku実況の設定。APIキーはスマホには一切同期せず、このlocalhost限定
+        // ダッシュボードからのみ読み書きする。生のキーは返さない（hasKeyのみ）。
+        app.MapGet("/api/haiku-settings", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            var settings = HaikuSettingsStore.Load();
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync(JsonSerializer.Serialize(new
+            {
+                enabled = settings.Enabled,
+                hasKey = !string.IsNullOrEmpty(settings.ApiKey),
+            }));
+        });
+
+        app.MapPut("/api/haiku-settings", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            using var ms = new MemoryStream();
+            await ctx.Request.Body.CopyToAsync(ms);
+            if (ms.Length > 4 * 1024) { ctx.Response.StatusCode = 413; return; }
+            try
+            {
+                using var doc = JsonDocument.Parse(ms.ToArray());
+                var root = doc.RootElement;
+                var enabled = root.TryGetProperty("enabled", out var e) && e.ValueKind == JsonValueKind.True;
+                string? apiKey = null;
+                if (root.TryGetProperty("apiKey", out var k) && k.ValueKind == JsonValueKind.String)
+                {
+                    var v = k.GetString();
+                    if (!string.IsNullOrEmpty(v)) apiKey = v;
+                }
+                HaikuSettingsStore.Save(enabled, apiKey);
+                ctx.Response.ContentType = "application/json";
+                await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true }));
+            }
+            catch (JsonException)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsync("invalid json");
+            }
+        });
+
         // Claude Codeフック（Stop/Notification）からのローカル通知中継。
         // localhost限定・フック側のPowerShellスクリプトからfire-and-forgetで叩かれる。
         app.MapPost("/api/claude-notify", async ctx =>
@@ -377,17 +419,13 @@ class WsServer
         "小学生にも伝わる柔らかい日本語で、15〜25文字程度の一文だけを出力してください。" +
         "説明・前置き・カギ括弧・絵文字は一切不要です。本文の一文のみを返してください。";
 
-    /// <summary>Claude Haikuで、ツール活動の実況コメントを1文生成する。ANTHROPIC_API_KEY未設定・
+    /// <summary>Claude Haikuで、ツール活動の実況コメントを1文生成する。実況OFF・APIキー未設定・
     /// 失敗・タイムアウト時はnull（呼び出し側はその場合メインの活動表示に影響させない）。</summary>
     private static async Task<string?> GenerateHaikuCommentaryAsync(string tool, string detail, string? cwd)
     {
-        // プロセス環境に無くてもユーザー/マシン環境変数（レジストリ）を直接読む。
-        // トレイは自動起動・手動起動・開発シェル起動など起動経路が多様で、
-        // プロセス環境が古いスナップショットのままのことがあるため。
-        var apiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY")
-            ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.User)
-            ?? Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY", EnvironmentVariableTarget.Machine);
-        if (string.IsNullOrEmpty(apiKey)) return null;
+        var settings = HaikuSettingsStore.Load();
+        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return null;
+        var apiKey = settings.ApiKey;
 
         var project = string.IsNullOrEmpty(cwd) ? null : Path.GetFileName(cwd.TrimEnd('\\', '/'));
         var userContent = $"プロジェクト: {project ?? "（不明）"}\nツール: {tool}\n詳細: {detail}";
