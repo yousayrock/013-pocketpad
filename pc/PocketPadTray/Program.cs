@@ -90,6 +90,7 @@ class TrayContext : ApplicationContext
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
                 $"http://localhost:{server.Port}/") { UseShellExecute = true }));
         menu.Items.Add("エラーログを開く", null, (_, _) => ShowErrorLog());
+        menu.Items.Add("タスクフックのログを開く", null, (_, _) => ShowTaskHookLog());
         menu.Items.Add("今日のキャラを作り直す", null, (_, _) =>
         {
             DailyCharacterService.ForceRegenerate();
@@ -164,6 +165,18 @@ class TrayContext : ApplicationContext
             return;
         }
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+    }
+
+    private static void ShowTaskHookLog()
+    {
+        if (!File.Exists(TaskHookLog.FilePath))
+        {
+            MessageBox.Show("タスクフックのログはまだありません。", "PocketPad タスクフックログ",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        System.Diagnostics.Process.Start(
+            new System.Diagnostics.ProcessStartInfo(TaskHookLog.FilePath) { UseShellExecute = true });
     }
 
     private static void ShowInfo(WsServer server)
