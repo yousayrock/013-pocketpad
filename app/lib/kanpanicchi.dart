@@ -60,7 +60,9 @@ class TodoItem {
   );
 
   final String content;
-  final String status; // "pending" | "in_progress" | "completed"
+  // "pending" | "in_progress" | "completed"
+  // 現在PC側から届くのは pending/completed のみ。in_progress は将来の互換用。
+  final String status;
   final String activeForm;
 }
 
@@ -717,6 +719,11 @@ class _TodoPanelState extends State<_TodoPanel> {
     _ => 1,
   };
 
+  static int _displayRank(TodoItem todo) {
+    if (todo.status == 'in_progress') return 0;
+    return _priorityRank(todo) + 1;
+  }
+
   @override
   Widget build(BuildContext context) {
     final todos = widget.todos;
@@ -731,6 +738,14 @@ class _TodoPanelState extends State<_TodoPanel> {
       );
     }
     final doneCount = todos.where((t) => t.status == 'completed').length;
+    final remaining = todos.where((t) => t.status != 'completed').toList()
+      ..sort((a, b) {
+        final rank = _displayRank(a).compareTo(_displayRank(b));
+        return rank != 0
+            ? rank
+            : todos.indexOf(a).compareTo(todos.indexOf(b));
+      });
+    final activeTodo = remaining.firstOrNull;
     final grouped = <String, List<TodoItem>>{};
     for (final todo in todos) {
       final match = _phasePrefix.firstMatch(todo.content);
@@ -744,7 +759,7 @@ class _TodoPanelState extends State<_TodoPanel> {
       phaseTodos.sort((a, b) {
         final rank = _statusRank(a.status).compareTo(_statusRank(b.status));
         if (rank != 0) return rank;
-        if (a.status != 'completed' && a.status != 'in_progress') {
+        if (a.status != 'completed') {
           final priorityRank = _priorityRank(a).compareTo(_priorityRank(b));
           if (priorityRank != 0) return priorityRank;
         }
@@ -824,7 +839,8 @@ class _TodoPanelState extends State<_TodoPanel> {
                   ),
                 ),
                 if (!_collapsedPhases.contains(entry.key))
-                  for (final t in entry.value) _buildTodo(t, color),
+                  for (final t in entry.value)
+                    _buildTodo(t, color, active: identical(t, activeTodo)),
               ],
             ],
           ),
@@ -833,16 +849,22 @@ class _TodoPanelState extends State<_TodoPanel> {
     );
   }
 
-  Widget _buildTodo(TodoItem todo, Color color) {
+  Widget _buildTodo(
+    TodoItem todo,
+    Color color, {
+    required bool active,
+  }) {
     final done = todo.status == 'completed';
-    final active = todo.status == 'in_progress';
     final icon = done
         ? Icons.check_circle
         : active
         ? Icons.autorenew
         : Icons.radio_button_unchecked;
     final iconColor = done ? color : (active ? _kMagenta : Colors.white24);
-    final rawLabel = active && todo.activeForm.isNotEmpty
+    final rawLabel =
+        active &&
+            todo.activeForm.isNotEmpty &&
+            todo.activeForm != todo.content
         ? todo.activeForm
         : todo.content;
     final label = rawLabel.replaceFirst(_phasePrefix, '');
@@ -919,8 +941,11 @@ class _TodoBoardState extends State<_TodoBoard> {
     return (match?.group(2) ?? match?.group(3))?.toUpperCase();
   }
 
-  static String _label(TodoItem task) {
-    final source = task.status == 'in_progress' && task.activeForm.isNotEmpty
+  static String _label(TodoItem task, {bool active = false}) {
+    final source =
+        active &&
+            task.activeForm.isNotEmpty &&
+            task.activeForm != task.content
         ? task.activeForm
         : task.content;
     return source.replaceFirst(_prefix, '');
@@ -958,6 +983,7 @@ class _TodoBoardState extends State<_TodoBoard> {
             ? ranked
             : tasks.indexOf(a).compareTo(tasks.indexOf(b));
       });
+    final activeTask = remaining.firstOrNull;
     final grouped = <String, List<TodoItem>>{};
     for (final task in tasks) {
       grouped.putIfAbsent(_phase(task), () => []).add(task);
@@ -1009,17 +1035,22 @@ class _TodoBoardState extends State<_TodoBoard> {
           )
         else
           for (final task in remaining.take(3))
-            _taskRow(task, phase: _phase(task)),
+            _taskRow(
+              task,
+              active: identical(task, activeTask),
+              phase: _phase(task),
+            ),
         const Divider(height: 4, thickness: 1, color: Colors.white10),
         Expanded(
           child: ListView(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
             children: [
               for (final entry in grouped.entries) ...[
-                _phaseHeader(entry.key, entry.value),
+                _phaseHeader(entry.key, entry.value, activeTask),
                 if (!_collapsed.contains(entry.key))
                   for (final task in entry.value)
-                    if (task.status != 'completed') _taskRow(task),
+                    if (task.status != 'completed')
+                      _taskRow(task, active: identical(task, activeTask)),
               ],
               _completedHeader(completed.length),
               if (!_completedCollapsed)
@@ -1089,12 +1120,16 @@ class _TodoBoardState extends State<_TodoBoard> {
     );
   }
 
-  Widget _phaseHeader(String phase, List<TodoItem> tasks) {
+  Widget _phaseHeader(
+    String phase,
+    List<TodoItem> tasks,
+    TodoItem? activeTask,
+  ) {
     final done = tasks.where((task) => task.status == 'completed').length;
     final urgent = tasks.any(
       (task) =>
           task.status != 'completed' &&
-          (task.status == 'in_progress' || _priority(task) == 'P1'),
+          (identical(task, activeTask) || _priority(task) == 'P1'),
     );
     return InkWell(
       onTap: () => setState(() {
@@ -1145,8 +1180,11 @@ class _TodoBoardState extends State<_TodoBoard> {
     );
   }
 
-  Widget _taskRow(TodoItem task, {String? phase}) {
-    final active = task.status == 'in_progress';
+  Widget _taskRow(
+    TodoItem task, {
+    required bool active,
+    String? phase,
+  }) {
     final priority = _priority(task);
     final priorityColor = switch (priority) {
       'P1' => Colors.redAccent,
@@ -1181,7 +1219,7 @@ class _TodoBoardState extends State<_TodoBoard> {
           ],
           Expanded(
             child: Text(
-              _label(task),
+              _label(task, active: active),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
