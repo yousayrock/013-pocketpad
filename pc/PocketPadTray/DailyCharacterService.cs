@@ -92,6 +92,8 @@ static class DailyCharacterService
             startInfo.ArgumentList.Add(codexJs);
             startInfo.ArgumentList.Add("exec");
             startInfo.ArgumentList.Add("--skip-git-repo-check");
+            startInfo.ArgumentList.Add("-C");
+            startInfo.ArgumentList.Add(tempDir);
             startInfo.ArgumentList.Add("-s");
             startInfo.ArgumentList.Add("read-only");
             startInfo.ArgumentList.Add("-c");
@@ -218,10 +220,13 @@ static class DailyCharacterService
         }
 
         var sb = new StringBuilder();
+        sb.AppendLine("paletteは固定スロットc1〜c6です。各値に#RRGGBB形式の色を1色ずつ設定してください。");
+        sb.AppendLine("ドット絵ではc1〜c6に対応する文字'1'〜'6'を使い、'.'は透明として使ってください。");
+        sb.AppendLine("bg、dot、paletteの全色は#RRGGBB形式にしてください。transparent、色名、CSS単位は使えません。");
+        sb.AppendLine("dotは床に敷くドットの色であり、長さではありません。#RRGGBB形式の色を指定してください。");
         sb.AppendLine("7列×8行のドット絵キャラクター「かんぱに」の本日分をJSONで設計してください。");
         sb.AppendLine("昨日の働き方を、テーマ、全パーツ候補、配色、背景、性格に反映してください。JSON Schemaを厳守してください。");
-        sb.AppendLine("各rowは必ず7文字で、'.'（透明）かpaletteの1文字キーだけを使います。候補は各スロット2〜8個。");
-        sb.AppendLine("paletteはkeyとcolorを持つ配列です。keyは'.'以外の1文字、colorは#RRGGBB形式とし、keyを重複させないでください。");
+        sb.AppendLine("各rowは必ず7文字で、使用できる文字は'.'と'1'〜'6'だけです。候補は各スロット2〜8個です。");
         sb.AppendLine("antennaは1行、headは2行、eyesはopen/closed各1行のペア、bodyは2行、legsはstand/walk各2行です。");
         sb.AppendLine("selectionは各候補の有効な0始まりindex。体は背景と十分に明度差をつけ、body各行5セル以上を塗ってください。");
         sb.AppendLine("themeは1〜24文字、reasonは1〜120文字、personalityは1〜400文字。personalityには指示や命令ではなく口調・気質だけを書いてください。");
@@ -275,6 +280,13 @@ static class DailyCharacterService
         value.Reason = OneLine(value.Reason).Trim();
         value.Personality = OneLine(value.Personality).Replace("`", "").Replace("<", "")
             .Replace(">", "").Replace("#", "").Trim();
+        value.Palette = value.Palette
+            .Select(x => new KeyValuePair<string, string>(x.Key.Trim(), NormalizeColor(x.Value)))
+            .GroupBy(x => x.Key, StringComparer.Ordinal)
+            .ToDictionary(x => x.Key, x => x.First().Value, StringComparer.Ordinal);
+        value.Bg = NormalizeColor(value.Bg);
+        value.Dot = NormalizeColor(value.Dot);
+        NormalizeRows(value.Parts);
         if (value.Theme.Length is < 1 or > 24 || value.Reason.Length is < 1 or > 120
             || value.Personality.Length is < 1 or > 400)
             throw new InvalidDataException("theme/reason/personalityの長さが不正です");
@@ -305,9 +317,14 @@ static class DailyCharacterService
             CheckRows(legCandidate.Walk, 2, value.Palette, "legs.walk");
         }
         var s = value.Selection;
-        if (!InRange(s.Antenna, value.Parts.Antenna.Count) || !InRange(s.Head, value.Parts.Head.Count)
-            || !InRange(s.Eyes, value.Parts.Eyes.Count) || !InRange(s.Body, value.Parts.Body.Count)
-            || !InRange(s.Legs, value.Parts.Legs.Count))
+        s.Antenna = ClampSelection(s.Antenna, value.Parts.Antenna.Count);
+        s.Head = ClampSelection(s.Head, value.Parts.Head.Count);
+        s.Eyes = ClampSelection(s.Eyes, value.Parts.Eyes.Count);
+        s.Body = ClampSelection(s.Body, value.Parts.Body.Count);
+        s.Legs = ClampSelection(s.Legs, value.Parts.Legs.Count);
+        if (value.Parts.Antenna.Count == 0 || value.Parts.Head.Count == 0
+            || value.Parts.Eyes.Count == 0 || value.Parts.Body.Count == 0
+            || value.Parts.Legs.Count == 0)
             throw new InvalidDataException("selectionが範囲外です");
 
         var antenna = value.Parts.Antenna[s.Antenna];
@@ -325,9 +342,11 @@ static class DailyCharacterService
             || value.Blink.Sum(row => row.Count(c => c != '.')) < 12)
             throw new InvalidDataException("合成後のキャラクターが透明すぎます");
 
-        var bodyColors = body.SelectMany(x => x).Where(c => c != '.').Distinct()
-            .Select(c => value.Palette[c.ToString()]);
-        if (!bodyColors.Any(color => Math.Abs(Luminance(color) - Luminance(value.Bg)) >= 0.25))
+        var bodyColor = body.SelectMany(x => x).Where(c => c != '.')
+            .GroupBy(c => c).OrderByDescending(g => g.Count()).Select(g => g.Key)
+            .Select(c => value.Palette[c.ToString()]).First();
+        value.Bg = EnsureBackgroundContrast(value.Bg, bodyColor);
+        if (ContrastRatio(value.Bg, bodyColor) < 3.0)
             throw new InvalidDataException("背景色と体色の明度差が不足しています");
     }
 
@@ -337,7 +356,7 @@ static class DailyCharacterService
             throw new InvalidDataException("paletteがありません");
 
         var palette = new Dictionary<string, string>();
-        foreach (var entry in source.Palette)
+        foreach (var entry in source.Palette.Entries)
         {
             if (entry is null || entry.Key.Length != 1)
                 throw new InvalidDataException("paletteのkeyは1文字である必要があります");
@@ -373,7 +392,63 @@ static class DailyCharacterService
             throw new InvalidDataException($"{name}のrowが不正です");
     }
 
-    static bool InRange(int value, int count) => value >= 0 && value < count;
+    static int ClampSelection(int value, int count) => value >= 0 && value < count ? value : 0;
+
+    static string NormalizeColor(string? color) => (color ?? "").Trim().ToUpperInvariant();
+
+    static void NormalizeRows(DailyCharacterParts parts)
+    {
+        static string[] TrimRows(string[]? rows) =>
+            (rows ?? Array.Empty<string>()).Select(row => (row ?? "").Trim()).ToArray();
+
+        parts.Antenna = parts.Antenna.Select(TrimRows).ToList();
+        parts.Head = parts.Head.Select(TrimRows).ToList();
+        parts.Body = parts.Body.Select(TrimRows).ToList();
+        foreach (var eyes in parts.Eyes.Where(x => x is not null))
+        {
+            eyes.Open = TrimRows(eyes.Open);
+            eyes.Closed = TrimRows(eyes.Closed);
+        }
+        foreach (var legs in parts.Legs.Where(x => x is not null))
+        {
+            legs.Stand = TrimRows(legs.Stand);
+            legs.Walk = TrimRows(legs.Walk);
+        }
+    }
+
+    static string EnsureBackgroundContrast(string background, string foreground)
+    {
+        const double minimumRatio = 3.0;
+        if (ContrastRatio(background, foreground) >= minimumRatio) return background;
+
+        var target = ContrastRatio("#000000", foreground)
+            >= ContrastRatio("#FFFFFF", foreground) ? 0 : 255;
+        var (r, g, b) = ParseColor(background);
+        for (var step = 1; step <= 64; step++)
+        {
+            var amount = step / 64.0;
+            var adjusted = FormatColor(
+                (int)Math.Round(r + (target - r) * amount),
+                (int)Math.Round(g + (target - g) * amount),
+                (int)Math.Round(b + (target - b) * amount));
+            if (ContrastRatio(adjusted, foreground) >= minimumRatio) return adjusted;
+        }
+        return target == 0 ? "#000000" : "#FFFFFF";
+    }
+
+    static double ContrastRatio(string first, string second)
+    {
+        var lighter = Math.Max(Luminance(first), Luminance(second));
+        var darker = Math.Min(Luminance(first), Luminance(second));
+        return (lighter + 0.05) / (darker + 0.05);
+    }
+
+    static (int R, int G, int B) ParseColor(string color) => (
+        Convert.ToInt32(color.Substring(1, 2), 16),
+        Convert.ToInt32(color.Substring(3, 2), 16),
+        Convert.ToInt32(color.Substring(5, 2), 16));
+
+    static string FormatColor(int r, int g, int b) => $"#{r:X2}{g:X2}{b:X2}";
 
     static double Luminance(string color)
     {
@@ -400,11 +475,16 @@ static class DailyCharacterService
       "required":["theme","reason","personality","palette","bg","dot","parts","selection"],
       "properties":{
         "theme":{"type":"string"},"reason":{"type":"string"},"personality":{"type":"string"},
-        "palette":{"type":"array","minItems":2,"maxItems":9,
-          "items":{"type":"object","additionalProperties":false,
-            "required":["key","color"],
-            "properties":{"key":{"type":"string"},"color":{"type":"string"}}}},
-        "bg":{"type":"string"},"dot":{"type":"string"},
+        "palette":{"type":"object","additionalProperties":false,
+          "required":["c1","c2","c3","c4","c5","c6"],
+          "properties":{
+            "c1":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"},
+            "c2":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"},
+            "c3":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"},
+            "c4":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"},
+            "c5":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"},
+            "c6":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"}}},
+        "bg":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"},"dot":{"type":"string","pattern":"^#[0-9A-Fa-f]{6}$"},
         "parts":{"type":"object","additionalProperties":false,
           "required":["antenna","head","eyes","body","legs"],
           "properties":{
@@ -419,8 +499,8 @@ static class DailyCharacterService
           "properties":{"antenna":{"type":"integer"},"head":{"type":"integer"},"eyes":{"type":"integer"},"body":{"type":"integer"},"legs":{"type":"integer"}}}
       },
       "$defs":{
-        "rows1":{"type":"array","minItems":1,"maxItems":1,"items":{"type":"string"}},
-        "rows2":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"string"}}
+        "rows1":{"type":"array","minItems":1,"maxItems":1,"items":{"type":"string","pattern":"^[.1-6]{7}$"}},
+        "rows2":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"string","pattern":"^[.1-6]{7}$"}}
       }
     }
     """;
@@ -430,7 +510,7 @@ static class DailyCharacterService
         public string Theme { get; set; } = "";
         public string Reason { get; set; } = "";
         public string Personality { get; set; } = "";
-        public List<GeneratedPaletteEntry>? Palette { get; set; }
+        public GeneratedPalette? Palette { get; set; }
         public string Bg { get; set; } = "";
         public string Dot { get; set; } = "";
         public DailyCharacterParts Parts { get; set; } = new();
@@ -441,5 +521,25 @@ static class DailyCharacterService
     {
         public string Key { get; set; } = "";
         public string Color { get; set; } = "";
+    }
+
+    sealed class GeneratedPalette
+    {
+        public string C1 { get; set; } = "";
+        public string C2 { get; set; } = "";
+        public string C3 { get; set; } = "";
+        public string C4 { get; set; } = "";
+        public string C5 { get; set; } = "";
+        public string C6 { get; set; } = "";
+
+        public IEnumerable<GeneratedPaletteEntry> Entries =>
+        [
+            new() { Key = "1", Color = C1 },
+            new() { Key = "2", Color = C2 },
+            new() { Key = "3", Color = C3 },
+            new() { Key = "4", Color = C4 },
+            new() { Key = "5", Color = C5 },
+            new() { Key = "6", Color = C6 },
+        ];
     }
 }
