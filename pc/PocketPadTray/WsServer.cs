@@ -81,9 +81,12 @@ class WsServer
         {
             _taskCounter = counter;
             _taskOrder.Clear();
-            _taskOrder.AddRange(order);
             _taskState.Clear();
-            foreach (var t in tasks) _taskState[t.Id] = (t.Content, t.Status, t.ActiveForm);
+            var obsoletePlaceholder = string.Concat("(不明な", "タスク)");
+            foreach (var t in tasks.Where(t => t.Content != obsoletePlaceholder))
+                _taskState[t.Id] = (t.Content, t.Status, t.ActiveForm);
+            _taskOrder.AddRange(order.Where(_taskState.ContainsKey));
+            PersistTaskStateLocked();
         }
     }
 
@@ -379,7 +382,7 @@ class WsServer
     }
 
     /// <summary>TaskUpdateの呼び出しをローカルのタスク状態に反映する。status:"deleted"は一覧から除去。
-    /// このプロセス起動前に作られたtaskId（未知）が来た場合は「不明なタスク」として追加する。</summary>
+    /// このプロセスが観測していないtaskIdへの更新は無視する。</summary>
     private List<object>? ApplyTaskUpdate(JsonElement root)
     {
         if (!root.TryGetProperty("tool_input", out var input) || input.ValueKind != JsonValueKind.Object)
@@ -400,8 +403,7 @@ class WsServer
             }
             if (!_taskState.TryGetValue(taskId, out var cur))
             {
-                cur = ("(不明なタスク)", "pending", "");
-                _taskOrder.Add(taskId);
+                return SnapshotTodosLocked();
             }
             _taskState[taskId] = (Get("subject") ?? cur.content, Get("status") ?? cur.status, Get("activeForm") ?? cur.activeForm);
             return SnapshotTodosLocked();

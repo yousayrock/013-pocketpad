@@ -782,10 +782,21 @@ class _StatsHeader extends StatelessWidget {
 
 /// 下半分の「TODOリスト」。Claude Code自身のTodoWriteの進捗をそのまま見せる
 /// （未着手/実行中/完了）。完了した分は_onTodosUpdatedでXPにも反映される。
-class _TodoPanel extends StatelessWidget {
+class _TodoPanel extends StatefulWidget {
   const _TodoPanel({required this.todos, required this.color});
   final List<TodoItem> todos;
   final Color color;
+
+  @override
+  State<_TodoPanel> createState() => _TodoPanelState();
+}
+
+class _TodoPanelState extends State<_TodoPanel> {
+  static final _phasePrefix = RegExp(
+    r'^\[(?:(?:phase|フェーズ)\s*:\s*([^/\]]+?)(?:\s*/\s*(P\d+))?|(P\d+))\]\s*',
+    caseSensitive: false,
+  );
+  final Set<String> _collapsedPhases = {};
 
   // 状態ごとの並び優先度: 実行中 → 未着手 → 完了。完了が下に沈むことで
   // 「今やっていること／これからやること」が上に残り、スクロールせず一目で分かる。
@@ -795,8 +806,25 @@ class _TodoPanel extends StatelessWidget {
     _ => 1,
   };
 
+  static String? _priorityOf(TodoItem todo) {
+    final match = _phasePrefix.firstMatch(todo.content);
+    final priority = (match?.group(2) ?? match?.group(3))?.toUpperCase();
+    return switch (priority) {
+      'P1' || 'P2' || 'P3' => priority,
+      _ => null,
+    };
+  }
+
+  static int _priorityRank(TodoItem todo) => switch (_priorityOf(todo)) {
+    'P1' => 0,
+    'P3' => 2,
+    _ => 1,
+  };
+
   @override
   Widget build(BuildContext context) {
+    final todos = widget.todos;
+    final color = widget.color;
     if (todos.isEmpty) {
       return const Center(
         child: Text(
@@ -806,14 +834,27 @@ class _TodoPanel extends StatelessWidget {
         ),
       );
     }
-    // 同じ状態内では元の順序を保つ安定ソート（インデックスを二次キーにする）。
-    final ordered = List<TodoItem>.from(todos)
-      ..sort((a, b) {
-        final r = _statusRank(a.status).compareTo(_statusRank(b.status));
-        if (r != 0) return r;
+    final doneCount = todos.where((t) => t.status == 'completed').length;
+    final grouped = <String, List<TodoItem>>{};
+    for (final todo in todos) {
+      final match = _phasePrefix.firstMatch(todo.content);
+      final phase = match?.group(1)?.trim();
+      grouped
+          .putIfAbsent(phase == null || phase.isEmpty ? '未分類' : phase, () => [])
+          .add(todo);
+    }
+    // フェーズの登場順は維持し、各フェーズ内で従来どおり状態別に安定ソートする。
+    for (final phaseTodos in grouped.values) {
+      phaseTodos.sort((a, b) {
+        final rank = _statusRank(a.status).compareTo(_statusRank(b.status));
+        if (rank != 0) return rank;
+        if (a.status != 'completed' && a.status != 'in_progress') {
+          final priorityRank = _priorityRank(a).compareTo(_priorityRank(b));
+          if (priorityRank != 0) return priorityRank;
+        }
         return todos.indexOf(a).compareTo(todos.indexOf(b));
       });
-    final doneCount = todos.where((t) => t.status == 'completed').length;
+    }
 
     return Column(
       children: [
@@ -841,50 +882,441 @@ class _TodoPanel extends StatelessWidget {
           ),
         ),
         Expanded(
-          child: ListView.builder(
+          child: ListView(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-            itemCount: ordered.length,
-            itemBuilder: (context, i) {
-              final t = ordered[i];
-              final done = t.status == 'completed';
-              final active = t.status == 'in_progress';
-              final icon = done
-                  ? Icons.check_circle
-                  : active
-                  ? Icons.autorenew
-                  : Icons.radio_button_unchecked;
-              final iconColor = done
-                  ? color
-                  : (active ? _kMagenta : Colors.white24);
-              final label = active && t.activeForm.isNotEmpty
-                  ? t.activeForm
-                  : t.content;
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 5),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Icon(icon, color: iconColor, size: 18),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        label,
-                        style: TextStyle(
-                          color: done ? Colors.white38 : Colors.white70,
-                          fontSize: 13,
-                          fontWeight: active
-                              ? FontWeight.w600
-                              : FontWeight.normal,
-                          decoration: done ? TextDecoration.lineThrough : null,
+            children: [
+              for (final entry in grouped.entries) ...[
+                InkWell(
+                  borderRadius: BorderRadius.circular(4),
+                  onTap: () => setState(() {
+                    if (!_collapsedPhases.add(entry.key)) {
+                      _collapsedPhases.remove(entry.key);
+                    }
+                  }),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Row(
+                      children: [
+                        Icon(
+                          _collapsedPhases.contains(entry.key)
+                              ? Icons.chevron_right
+                              : Icons.expand_more,
+                          color: Colors.white54,
+                          size: 19,
                         ),
-                      ),
+                        const SizedBox(width: 3),
+                        Expanded(
+                          child: Text(
+                            entry.key,
+                            style: const TextStyle(
+                              color: Colors.white60,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          '${entry.value.where((t) => t.status == 'completed').length}'
+                          '/${entry.value.length}',
+                          style: const TextStyle(
+                            color: Colors.white30,
+                            fontSize: 10,
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
-              );
-            },
+                if (!_collapsedPhases.contains(entry.key))
+                  for (final t in entry.value) _buildTodo(t, color),
+              ],
+            ],
           ),
         ),
+      ],
+    );
+  }
+
+  Widget _buildTodo(TodoItem todo, Color color) {
+    final done = todo.status == 'completed';
+    final active = todo.status == 'in_progress';
+    final icon = done
+        ? Icons.check_circle
+        : active
+        ? Icons.autorenew
+        : Icons.radio_button_unchecked;
+    final iconColor = done ? color : (active ? _kMagenta : Colors.white24);
+    final rawLabel = active && todo.activeForm.isNotEmpty
+        ? todo.activeForm
+        : todo.content;
+    final label = rawLabel.replaceFirst(_phasePrefix, '');
+    final priorityColor = switch (_priorityOf(todo)) {
+      'P1' => Colors.redAccent,
+      'P2' => Colors.amber,
+      'P3' => Colors.white38,
+      _ => null,
+    };
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 5, 0, 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (priorityColor != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Container(
+                width: 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  color: priorityColor,
+                  shape: BoxShape.circle,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+          ],
+          Icon(icon, color: iconColor, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: done ? Colors.white38 : Colors.white70,
+                fontSize: 13,
+                fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+                decoration: done ? TextDecoration.lineThrough : null,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TodoBoard extends StatefulWidget {
+  const _TodoBoard({required this.todos, required this.color});
+
+  final List<TodoItem> todos;
+  final Color color;
+
+  @override
+  State<_TodoBoard> createState() => _TodoBoardState();
+}
+
+class _TodoBoardState extends State<_TodoBoard> {
+  static final _prefix = RegExp(
+    r'^\[(?:(?:phase|フェーズ)\s*:\s*([^/\]]+?)(?:\s*/\s*(P\d+))?|(P\d+))\]\s*',
+    caseSensitive: false,
+  );
+  final Set<String> _collapsed = {};
+
+  static String _phase(TodoItem task) {
+    final value = _prefix.firstMatch(task.content)?.group(1)?.trim();
+    return value == null || value.isEmpty ? '未分類' : value;
+  }
+
+  static String? _priority(TodoItem task) {
+    final match = _prefix.firstMatch(task.content);
+    return (match?.group(2) ?? match?.group(3))?.toUpperCase();
+  }
+
+  static String _label(TodoItem task) {
+    final source = task.status == 'in_progress' && task.activeForm.isNotEmpty
+        ? task.activeForm
+        : task.content;
+    return source.replaceFirst(_prefix, '');
+  }
+
+  static int _rank(TodoItem task) => switch (task.status) {
+    'in_progress' => 0,
+    _ => switch (_priority(task)) {
+      'P1' => 1,
+      'P3' => 3,
+      _ => 2,
+    },
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final tasks = widget.todos;
+    if (tasks.isEmpty) {
+      return const Center(
+        child: Text(
+          'Claude CodeがTODOを作ると\nここに一覧が表示されます',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.white24, fontSize: 11),
+        ),
+      );
+    }
+    final done = tasks.where((task) => task.status == 'completed').length;
+    final remaining = tasks.where((task) => task.status != 'completed').toList()
+      ..sort((a, b) {
+        final ranked = _rank(a).compareTo(_rank(b));
+        return ranked != 0
+            ? ranked
+            : tasks.indexOf(a).compareTo(tasks.indexOf(b));
+      });
+    final grouped = <String, List<TodoItem>>{};
+    for (final task in tasks) {
+      grouped.putIfAbsent(_phase(task), () => []).add(task);
+    }
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 1),
+          child: Row(
+            children: [
+              Text(
+                '進捗 $done/${tasks.length}  残り${remaining.length}',
+                style: const TextStyle(color: Colors.white60, fontSize: 10),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: LinearProgressIndicator(
+                  value: done / tasks.length,
+                  minHeight: 3,
+                  backgroundColor: Colors.white12,
+                  valueColor: AlwaysStoppedAnimation<Color>(widget.color),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 2, 12, 0),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              '次にやる',
+              style: TextStyle(
+                color: widget.color,
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+          ),
+        ),
+        if (remaining.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 7),
+            child: Text(
+              'すべて完了しました',
+              style: TextStyle(color: Colors.white38, fontSize: 11),
+            ),
+          )
+        else
+          for (final task in remaining.take(3))
+            _taskRow(task, phase: _phase(task)),
+        const Divider(height: 4, thickness: 1, color: Colors.white10),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+            children: [
+              for (final entry in grouped.entries) ...[
+                _phaseHeader(entry.key, entry.value),
+                if (!_collapsed.contains(entry.key))
+                  for (final task in entry.value)
+                    if (task.status != 'completed') _taskRow(task),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _phaseHeader(String phase, List<TodoItem> tasks) {
+    final done = tasks.where((task) => task.status == 'completed').length;
+    final urgent = tasks.any(
+      (task) =>
+          task.status != 'completed' &&
+          (task.status == 'in_progress' || _priority(task) == 'P1'),
+    );
+    return InkWell(
+      onTap: () => setState(() {
+        if (!_collapsed.add(phase)) _collapsed.remove(phase);
+      }),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          children: [
+            Icon(
+              _collapsed.contains(phase)
+                  ? Icons.chevron_right
+                  : Icons.expand_more,
+              color: urgent ? _kMagenta : Colors.white54,
+              size: 16,
+            ),
+            Expanded(
+              child: Text(
+                phase,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: urgent ? Colors.white : Colors.white60,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 42,
+              child: LinearProgressIndicator(
+                value: done / tasks.length,
+                minHeight: 2,
+                backgroundColor: Colors.white12,
+                valueColor: AlwaysStoppedAnimation<Color>(
+                  urgent ? _kMagenta : widget.color,
+                ),
+              ),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              '$done/${tasks.length}',
+              style: const TextStyle(color: Colors.white38, fontSize: 9),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _taskRow(TodoItem task, {String? phase}) {
+    final active = task.status == 'in_progress';
+    final priority = _priority(task);
+    final priorityColor = switch (priority) {
+      'P1' => Colors.redAccent,
+      'P2' => Colors.amber,
+      'P3' => Colors.white38,
+      _ => Colors.transparent,
+    };
+    return Container(
+      margin: EdgeInsets.fromLTRB(phase == null ? 16 : 12, 1, 0, 1),
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: priorityColor, width: 2)),
+      ),
+      padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 5),
+      child: Row(
+        children: [
+          Icon(
+            active ? Icons.autorenew : Icons.radio_button_unchecked,
+            color: active ? _kMagenta : Colors.white24,
+            size: 13,
+          ),
+          const SizedBox(width: 5),
+          if (priority != null) ...[
+            Text(
+              priority,
+              style: TextStyle(
+                color: priorityColor,
+                fontSize: 8,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(width: 4),
+          ],
+          Expanded(
+            child: Text(
+              _label(task),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: Colors.white70,
+                fontSize: 11,
+                fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+              ),
+            ),
+          ),
+          if (phase != null) ...[
+            const SizedBox(width: 4),
+            Container(
+              constraints: const BoxConstraints(maxWidth: 68),
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              decoration: BoxDecoration(
+                color: Colors.white10,
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                phase,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white54, fontSize: 8),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _CompletedTodoPanel extends StatelessWidget {
+  const _CompletedTodoPanel({required this.todos});
+
+  final List<TodoItem> todos;
+
+  @override
+  Widget build(BuildContext context) {
+    final completed = todos
+        .where((task) => task.status == 'completed')
+        .toList();
+    if (completed.isEmpty) {
+      return const Center(
+        child: Text(
+          'まだ完了したタスクはありません',
+          style: TextStyle(color: Colors.white30, fontSize: 11),
+        ),
+      );
+    }
+    final grouped = <String, List<TodoItem>>{};
+    for (final task in completed) {
+      grouped.putIfAbsent(_TodoBoardState._phase(task), () => []).add(task);
+    }
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 5, 12, 8),
+      children: [
+        for (final entry in grouped.entries) ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(2, 4, 2, 1),
+            child: Text(
+              '${entry.key}  ${entry.value.length}件',
+              style: const TextStyle(
+                color: Colors.white54,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          for (final task in entry.value)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.check_circle_outline,
+                    color: Colors.white24,
+                    size: 13,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      _TodoBoardState._label(task),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                        decoration: TextDecoration.lineThrough,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
       ],
     );
   }
@@ -1197,7 +1629,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   // Timer+jumpToだとvsyncと同期せずカクつくため、animateTo（Flutterの
   // アニメーション基盤でティッカー駆動）でループさせる。
   final ScrollController _statusScroll = ScrollController();
-  final PageController _bottomPageController = PageController();
+  final PageController _bottomPageController = PageController(
+    initialPage: 0,
+    keepPage: false,
+  );
   String? _marqueeLabelSeen;
   int _marqueeGeneration = 0;
   // レベルアップ演出は外部Overlayへ出さず、このパネルのStack内に描画する。
@@ -1873,6 +2308,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                           // TODO/実況ログは下のカラムをどこでも横スワイプすれば切り替わる。
                           _bottomPageDot(0),
                           _bottomPageDot(1),
+                          _bottomPageDot(2),
                         ],
                       ),
                     ),
@@ -1881,7 +2317,8 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                         controller: _bottomPageController,
                         onPageChanged: (i) => setState(() => _bottomTab = i),
                         children: [
-                          _TodoPanel(todos: widget.todos, color: _status.color),
+                          _TodoBoard(todos: widget.todos, color: _status.color),
+                          _CompletedTodoPanel(todos: widget.todos),
                           _CommentaryPanel(
                             comments: _commentLog,
                             color: _status.color,
