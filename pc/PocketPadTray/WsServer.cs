@@ -108,12 +108,19 @@ class WsServer
     //         （last_assistant_message）を実況口調に変換する。実行前の推測ではなく
     //         Claude自身の実際の報告が元ネタなので、内容の正しさはこちらが保証する。
     // 中間のバッチ要約（旧・デバウンス確定方式）は「結果を断定してしまう」問題が
-    // あったため廃止した。_activityBuffer はそのターンで使われたツール一覧として
-    // 終了実況の補助情報にのみ使う（lockの外でAPI呼び出し・WS送信を行う設計は維持）。
+    // あったため廃止した。活動履歴は資料室の日誌作成にも使うため、Haiku設定に関係なく
+    // セッション単位で蓄積する（lockの外でAPI呼び出し・WS送信を行う設計は維持）。
     private readonly object _commentaryGate = new();
     private readonly SemaphoreSlim _flushLock = new(1, 1); // 実況の生成〜送信を直列化（順序と重複回避の一貫性）
-    private readonly List<(string tool, string detail)> _activityBuffer = new();
-    private string? _lastActivityCwd;
+    private sealed class ActivitySessionState
+    {
+        public List<(string tool, string detail)> Activities { get; } = new();
+        public string? Cwd { get; set; }
+        public DateTime LastActivityUtc { get; set; } = DateTime.UtcNow;
+    }
+    private const string _defaultActivitySessionKey = "\0default";
+    private static readonly TimeSpan _activitySessionMaxIdle = TimeSpan.FromHours(24);
+    private readonly Dictionary<string, ActivitySessionState> _activitySessions = new();
     private readonly List<string> _recentComments = new(); // 直近に送った実況（重複回避用）
     private const int _recentCommentsKeep = 20;            // 直近何件をプロンプトに渡すか
     private const int _progressEveryN = 6;                 // 長いターン中、この件数ごとに途中経過を挟む
@@ -247,11 +254,22 @@ class WsServer
                 var root = doc.RootElement;
                 var ev = root.TryGetProperty("event", out var evProp) ? evProp.GetString() ?? "" : "";
                 var message = root.TryGetProperty("message", out var msgProp) ? msgProp.GetString() ?? "" : "";
+                var fullMessage = root.TryGetProperty("full_message", out var fullMsgProp)
+                    && fullMsgProp.ValueKind == JsonValueKind.String ? fullMsgProp.GetString() : null;
+                var sessionId = root.TryGetProperty("session_id", out var sessionProp)
+                    && sessionProp.ValueKind == JsonValueKind.String ? sessionProp.GetString() : null;
+                var cwd = root.TryGetProperty("cwd", out var cwdProp)
+                    && cwdProp.ValueKind == JsonValueKind.String ? cwdProp.GetString() : null;
                 var pushed = await PushClaudeNotifyAsync(ev, message);
                 // stop（ターン完了。event が "notification"=承認待ち 以外）で、
                 // Claude自身が書いた最終応答（last_assistant_message）を実況口調に
                 // 変換して「終了」実況を出す。実行前の推測ではなく実際の報告が元ネタ。
-                if (ev != "notification") _ = Task.Run(() => FlushEndCommentaryAsync(message));
+                if (string.Equals(ev, "Stop", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 新しいフックは日誌用全文を送る。旧フックとの互換性のためmessageへフォールバックする。
+                    var journalMessage = fullMessage ?? message;
+                    _ = Task.Run(() => FlushEndCommentaryAsync(journalMessage, sessionId, cwd));
+                }
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
             }
@@ -281,6 +299,8 @@ class WsServer
                 var tool = root.TryGetProperty("tool_name", out var toolProp) ? toolProp.GetString() ?? "" : "";
                 var detail = ExtractActivityDetail(tool, root);
                 var cwd = root.TryGetProperty("cwd", out var cwdProp) ? cwdProp.GetString() : null;
+                var sessionId = root.TryGetProperty("session_id", out var sessionProp)
+                    && sessionProp.ValueKind == JsonValueKind.String ? sessionProp.GetString() : null;
                 var pushed = await PushClaudeActivityAsync(tool, detail);
                 if (tool == "TodoWrite")
                 {
@@ -299,7 +319,7 @@ class WsServer
                 // Haiku実況: フックの応答（Claude Codeが待つ）は遅らせず即返す。
                 // このターンで最初の活動なら即座に「開始」実況、以降はターンの
                 // ツール一覧として蓄積するだけ（終了実況の補助情報用）。
-                if (tool.Length > 0) EnqueueActivityForCommentary(tool, detail, cwd);
+                if (tool.Length > 0) EnqueueActivityForCommentary(tool, detail, cwd, sessionId);
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true, pushed }));
             }
@@ -614,25 +634,41 @@ class WsServer
     /// <summary>ツール活動をそのターンの記録として積む。バッファが空だった（＝このターン最初の
     /// 活動）なら、その場で「開始」実況を即座に生成・送信する（デバウンスなし）。長いターンが
     /// 続く間は、_progressEveryN件ごとに「途中経過」も挟む（開始・途中とも結果は語らない）。
-    /// それ以外の活動は終了実況の補助情報として溜めるだけ。OFF/キー未設定なら何もしない。</summary>
-    private void EnqueueActivityForCommentary(string tool, string detail, string? cwd)
+    /// それ以外の活動も資料室の日誌用に溜める。蓄積は常に行い、Haiku実況の生成だけを設定で分岐する。</summary>
+    private void EnqueueActivityForCommentary(string tool, string detail, string? cwd, string? sessionId)
     {
-        var settings = HaikuSettingsStore.Load();
-        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return;
-
         bool isFirstOfTurn;
         List<(string tool, string detail)>? progressSnapshot = null;
+        var sessionKey = ActivitySessionKey(sessionId);
         lock (_commentaryGate)
         {
-            isFirstOfTurn = _activityBuffer.Count == 0;
-            _activityBuffer.Add((tool, detail));
-            if (!string.IsNullOrEmpty(cwd)) _lastActivityCwd = cwd;
-            if (!isFirstOfTurn && _activityBuffer.Count % _progressEveryN == 0)
+            var now = DateTime.UtcNow;
+            foreach (var staleKey in _activitySessions
+                         .Where(x => now - x.Value.LastActivityUtc > _activitySessionMaxIdle)
+                         .Select(x => x.Key)
+                         .ToArray())
             {
-                var start = Math.Max(0, _activityBuffer.Count - _progressEveryN);
-                progressSnapshot = _activityBuffer.GetRange(start, _activityBuffer.Count - start);
+                _activitySessions.Remove(staleKey);
+            }
+
+            if (!_activitySessions.TryGetValue(sessionKey, out var state))
+            {
+                state = new ActivitySessionState();
+                _activitySessions[sessionKey] = state;
+            }
+            isFirstOfTurn = state.Activities.Count == 0;
+            state.Activities.Add((tool, detail));
+            if (!string.IsNullOrEmpty(cwd)) state.Cwd = cwd;
+            state.LastActivityUtc = now;
+            if (!isFirstOfTurn && state.Activities.Count % _progressEveryN == 0)
+            {
+                var start = Math.Max(0, state.Activities.Count - _progressEveryN);
+                progressSnapshot = state.Activities.GetRange(start, state.Activities.Count - start);
             }
         }
+
+        var settings = HaikuSettingsStore.Load();
+        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return;
 
         if (isFirstOfTurn)
         {
@@ -699,16 +735,28 @@ class WsServer
 
     /// <summary>stop（ターン完了）で、そのターンの実際の最終応答（<paramref name="lastAssistantMessage"/>）
     /// を実況口調に変換して「終了」実況として送る。バッファのツール一覧は補助情報として添える。</summary>
-    private async Task FlushEndCommentaryAsync(string lastAssistantMessage)
+    private static string ActivitySessionKey(string? sessionId) =>
+        string.IsNullOrWhiteSpace(sessionId) ? _defaultActivitySessionKey : sessionId;
+
+    private async Task FlushEndCommentaryAsync(
+        string lastAssistantMessage, string? sessionId, string? notifyCwd)
     {
         List<(string tool, string detail)> batch;
         List<string> recent;
         string? cwd;
         lock (_commentaryGate)
         {
-            batch = new List<(string tool, string detail)>(_activityBuffer);
-            _activityBuffer.Clear();
-            cwd = _lastActivityCwd;
+            var sessionKey = ActivitySessionKey(sessionId);
+            if (_activitySessions.Remove(sessionKey, out var state))
+            {
+                batch = new List<(string tool, string detail)>(state.Activities);
+                cwd = state.Cwd ?? notifyCwd;
+            }
+            else
+            {
+                batch = new List<(string tool, string detail)>();
+                cwd = notifyCwd;
+            }
             recent = new List<string>(_recentComments);
         }
         if (string.IsNullOrWhiteSpace(lastAssistantMessage)) return;
@@ -731,7 +779,7 @@ class WsServer
 
     /// <summary>ターン完了時の最終応答をそのまま資料室の日誌として1件記録する。新しいAI呼び出しは
     /// 増やさず、既にこのターンで集めた情報（activities）だけを使う。失敗しても無視する
-    /// （資料室はおまけ機能で、メインのHaiku実況/TODO表示には影響させない）。</summary>
+    /// （失敗してもHaiku実況/TODO表示には影響させない）。</summary>
     private void RecordKnowledgeEntry(
         string lastAssistantMessage, IReadOnlyList<(string tool, string detail)> activities, string? cwd)
     {
@@ -770,7 +818,7 @@ class WsServer
         }
         catch (Exception ex)
         {
-            // 資料室はおまけ機能。失敗してもメインのHaiku実況/TODO表示には影響させないが、
+            // 資料室の保存失敗がHaiku実況/TODO表示には影響しないようにしつつ、
             // 後から追えるようログには残す。
             ErrorLog.Append("RecordKnowledgeEntry", ex);
         }

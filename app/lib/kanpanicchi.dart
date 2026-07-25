@@ -1011,6 +1011,7 @@ class _TodoBoardState extends State<_TodoBoard> {
     caseSensitive: false,
   );
   final Set<String> _collapsed = {};
+  bool _completedCollapsed = true;
 
   static String _phase(TodoItem task) {
     final value = _prefix.firstMatch(task.content)?.group(1)?.trim();
@@ -1051,6 +1052,9 @@ class _TodoBoardState extends State<_TodoBoard> {
       );
     }
     final done = tasks.where((task) => task.status == 'completed').length;
+    final completed = tasks
+        .where((task) => task.status == 'completed')
+        .toList();
     final remaining = tasks.where((task) => task.status != 'completed').toList()
       ..sort((a, b) {
         final ranked = _rank(a).compareTo(_rank(b));
@@ -1121,10 +1125,71 @@ class _TodoBoardState extends State<_TodoBoard> {
                   for (final task in entry.value)
                     if (task.status != 'completed') _taskRow(task),
               ],
+              _completedHeader(completed.length),
+              if (!_completedCollapsed)
+                for (final task in completed) _completedTaskRow(task),
             ],
           ),
         ),
       ],
+    );
+  }
+
+  Widget _completedHeader(int count) {
+    return InkWell(
+      onTap: () => setState(() {
+        _completedCollapsed = !_completedCollapsed;
+      }),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          children: [
+            Icon(
+              _completedCollapsed ? Icons.chevron_right : Icons.expand_more,
+              color: Colors.white38,
+              size: 16,
+            ),
+            Expanded(
+              child: Text(
+                '完了 $count件',
+                style: const TextStyle(
+                  color: Colors.white54,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _completedTaskRow(TodoItem task) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 2, 0, 2),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.check_circle_outline,
+            color: Colors.white24,
+            size: 13,
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              _label(task),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white38,
+                fontSize: 11,
+                decoration: TextDecoration.lineThrough,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1249,75 +1314,6 @@ class _TodoBoardState extends State<_TodoBoard> {
           ],
         ],
       ),
-    );
-  }
-}
-
-class _CompletedTodoPanel extends StatelessWidget {
-  const _CompletedTodoPanel({required this.todos});
-
-  final List<TodoItem> todos;
-
-  @override
-  Widget build(BuildContext context) {
-    final completed = todos
-        .where((task) => task.status == 'completed')
-        .toList();
-    if (completed.isEmpty) {
-      return const Center(
-        child: Text(
-          'まだ完了したタスクはありません',
-          style: TextStyle(color: Colors.white30, fontSize: 11),
-        ),
-      );
-    }
-    final grouped = <String, List<TodoItem>>{};
-    for (final task in completed) {
-      grouped.putIfAbsent(_TodoBoardState._phase(task), () => []).add(task);
-    }
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(12, 5, 12, 8),
-      children: [
-        for (final entry in grouped.entries) ...[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(2, 4, 2, 1),
-            child: Text(
-              '${entry.key}  ${entry.value.length}件',
-              style: const TextStyle(
-                color: Colors.white54,
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          for (final task in entry.value)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-              child: Row(
-                children: [
-                  const Icon(
-                    Icons.check_circle_outline,
-                    color: Colors.white24,
-                    size: 13,
-                  ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      _TodoBoardState._label(task),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white38,
-                        fontSize: 11,
-                        decoration: TextDecoration.lineThrough,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ],
     );
   }
 }
@@ -2308,7 +2304,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                           // TODO/実況ログは下のカラムをどこでも横スワイプすれば切り替わる。
                           _bottomPageDot(0),
                           _bottomPageDot(1),
-                          _bottomPageDot(2),
                         ],
                       ),
                     ),
@@ -2318,7 +2313,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                         onPageChanged: (i) => setState(() => _bottomTab = i),
                         children: [
                           _TodoBoard(todos: widget.todos, color: _status.color),
-                          _CompletedTodoPanel(todos: widget.todos),
                           _CommentaryPanel(
                             comments: _commentLog,
                             color: _status.color,
