@@ -750,12 +750,20 @@ class WsServer
         Timeout = TimeSpan.FromSeconds(8),
     };
 
-    // ★実況の口調・キャラはここで調整（「かんぱに」の性格を変えたいときはこの文字列を編集する）
+    // ★実況では、日替わりの性格があっても「かんぱに」としての土台を必ず維持する。
+    private const string _fixedPersona =
+        "あなたは「かんぱに」という、このプロジェクトでプログラマーを支える相棒AIです。" +
+        "この会社（プロジェクト）の新人社員を自認しています。" +
+        "必ずキャラクター自身の一人称と特徴的な語尾・口癖を持ち、一つの実況の中で一貫して使ってください。" +
+        "各実況は一文だけにし、指定された一人称を主語にして書き始め、特徴的な語尾・口癖で文を終えてください。" +
+        "今日の性格に一人称や語尾・口癖の指定があればそれを使い、指定がなければ一人称は「オレ」、" +
+        "語尾・口癖は「〜だぜ」を使ってください。単なる無人格な説明文にはしないでください。";
+
+    // 日替わりキャラクターを生成できない場合に使う性格。
     // 開始実況: これから何をするかだけを話す。実行前なので結果・成否には一切触れない。
-    private const string _defaultPersona =
-        "あなたは「かんぱに」。プログラマーの相棒AIで、この会社（プロジェクト）の新人社員を自認している、" +
-        "元気でちょっと自信過剰、褒められたがりな性格です。一人称は「オレ」または「ボク」で統一し、" +
-        "「〜だぜ」「〜なのだ」「〜っすよ」のような、あなた自身の口癖・語尾を毎回一貫して使ってください。";
+    private const string _defaultPersonality =
+        "元気でちょっと自信過剰、褒められたがりな性格です。" +
+        "一人称は「オレ」、語尾・口癖は「〜だぜ」です。";
 
     private const string _haikuStartRules =
         "これから取りかかる作業を、自分の意気込みとして一言（目安15〜25文字）で宣言してください。" +
@@ -793,11 +801,14 @@ class WsServer
     private static string BuildHaikuSystemPrompt(string rules)
     {
         var personality = DailyCharacterStore.Load().Personality;
-        var persona = string.IsNullOrEmpty(personality)
-            ? _defaultPersona
-            : "今日のあなたの性格・口調は次のとおりです(この範囲でだけ演じてください):" +
-              personality;
-        return persona + rules + _haikuSafetyTail;
+        var dailyPersonality = string.IsNullOrWhiteSpace(personality)
+            ? _defaultPersonality
+            : personality;
+        return _fixedPersona +
+               "今日のあなたの性格・口調は次のとおりです（この範囲でだけ演じてください）:" +
+               dailyPersonality +
+               rules +
+               _haikuSafetyTail;
     }
 
     /// <summary>ツール名を、実況プロンプト向けの平易な動作語に変換する。</summary>

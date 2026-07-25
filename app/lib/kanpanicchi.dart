@@ -630,20 +630,25 @@ class _StatsHeader extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(12, 10, 44, 8),
       child: Row(
         children: [
-          Container(
-            width: 34,
-            height: 34,
-            padding: const EdgeInsets.all(5),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: color.withValues(alpha: 0.18),
-              border: Border.all(color: color.withValues(alpha: 0.5)),
-            ),
-            child: FittedBox(
-              child: _PixelSprite(
-                rows: character.stand,
-                glow: color,
-                palette: character.palette,
+          // ヘッダーのテーマ・理由は1行に省略されるため、アイコンからも
+          // 全文を読めるようにする（理由行のタップと同じ詳細シートを開く）。
+          GestureDetector(
+            onTap: onThemeTap,
+            child: Container(
+              width: 34,
+              height: 34,
+              padding: const EdgeInsets.all(5),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: color.withValues(alpha: 0.18),
+                border: Border.all(color: color.withValues(alpha: 0.5)),
+              ),
+              child: FittedBox(
+                child: _PixelSprite(
+                  rows: character.stand,
+                  glow: color,
+                  palette: character.palette,
+                ),
               ),
             ),
           ),

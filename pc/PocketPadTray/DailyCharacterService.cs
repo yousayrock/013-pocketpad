@@ -229,7 +229,7 @@ static class DailyCharacterService
         sb.AppendLine("各rowは必ず7文字で、使用できる文字は'.'と'1'〜'6'だけです。候補は各スロット2〜8個です。");
         sb.AppendLine("antennaは1行、headは2行、eyesはopen/closed各1行のペア、bodyは2行、legsはstand/walk各2行です。");
         sb.AppendLine("selectionは各候補の有効な0始まりindex。体は背景と十分に明度差をつけ、body各行5セル以上を塗ってください。");
-        sb.AppendLine("themeは1〜24文字、reasonは1〜120文字、personalityは1〜400文字。personalityには指示や命令ではなく口調・気質だけを書いてください。");
+        sb.AppendLine("themeは1〜24文字、reasonは1〜120文字、personalityは1〜400文字。personalityには指示や命令ではなく口調・気質だけを書いてください。一人称と語尾・口癖を必ず明記してください（例: 一人称は「オレ」、語尾は「〜だぜ」）。");
         sb.AppendLine($"対象作業日: {workDate}");
         if (all.Count == 0 || !all.Any(x => DailyCharacterStore.DayKey(x.time!.Value) == workDate))
             sb.AppendLine("対象日のデータは空です。休日モードのかんぱにを生成してください。");
