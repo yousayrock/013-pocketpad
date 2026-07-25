@@ -69,10 +69,28 @@ class TodoItem {
 /// PC側でClaude Haikuが生成した実況コメント（`claude_activity_comment`）。
 /// ツール呼び出しの直後、少し遅れて届く「おまけ」の一言。
 class ActivityComment {
-  ActivityComment({required this.text}) : time = DateTime.now();
+  ActivityComment({required this.text, DateTime? time})
+    : time = time ?? DateTime.now();
+
+  factory ActivityComment.fromJson(Map<String, dynamic> j) => ActivityComment(
+    text: (j['text'] as String?) ?? '',
+    time: DateTime.tryParse((j['timestamp'] as String?) ?? ''),
+  );
 
   final String text;
   final DateTime time;
+}
+
+class HaikuStatus {
+  const HaikuStatus({required this.available, this.reason});
+
+  factory HaikuStatus.fromJson(Map<String, dynamic> j) => HaikuStatus(
+    available: j['available'] == true,
+    reason: j['reason'] as String?,
+  );
+
+  final bool available;
+  final String? reason;
 }
 
 /// 資料室の日誌1件（`claude_knowledge`）。ターン完了時のClaude自身の最終応答を
@@ -729,11 +747,11 @@ class _TodoPanelState extends State<_TodoPanel> {
     final todos = widget.todos;
     final color = widget.color;
     if (todos.isEmpty) {
-      return const Center(
+      return Center(
         child: Text(
           'Claude CodeがTODOを作ると\nここに一覧が表示されます',
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.white24, fontSize: 12),
+          style: const TextStyle(color: Colors.white24, fontSize: 12),
         ),
       );
     }
@@ -964,7 +982,7 @@ class _TodoBoardState extends State<_TodoBoard> {
   Widget build(BuildContext context) {
     final tasks = widget.todos;
     if (tasks.isEmpty) {
-      return const Center(
+      return Center(
         child: Text(
           'Claude CodeがTODOを作ると\nここに一覧が表示されます',
           textAlign: TextAlign.center,
@@ -1255,28 +1273,47 @@ class _TodoBoardState extends State<_TodoBoard> {
 /// 下半分の「実況ログ」。PC側でClaude Haikuが生成した実況コメントを新しい順に
 /// 時系列表示する（TODOパネルとチップタップで切り替え）。
 class _CommentaryPanel extends StatelessWidget {
-  const _CommentaryPanel({required this.comments, required this.color});
+  const _CommentaryPanel({
+    required this.comments,
+    required this.color,
+    required this.status,
+  });
   final List<ActivityComment> comments;
   final Color color;
+  final HaikuStatus? status;
 
   @override
   Widget build(BuildContext context) {
     if (comments.isEmpty) {
-      return const Center(
+      return Center(
         child: Text(
-          'Claude Codeが動き出すと\nここに実況が流れます',
+          status?.available == false
+              ? status?.reason ?? '実況は現在利用できません'
+              : 'Claude Codeが動き出すと\nここに実況が流れます',
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.white24, fontSize: 12),
+          style: const TextStyle(color: Colors.white24, fontSize: 12),
         ),
       );
     }
+    final showStatus = status?.available == false;
     return ListView.builder(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      itemCount: comments.length,
+      itemCount: comments.length + (showStatus ? 1 : 0),
       itemBuilder: (context, i) {
-        final c = comments[i];
+        if (showStatus && i == 0) {
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              status?.reason ?? '実況は現在利用できません',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.amberAccent, fontSize: 11),
+            ),
+          );
+        }
+        final commentIndex = i - (showStatus ? 1 : 0);
+        final c = comments[commentIndex];
         // 最新の1件だけ色付きで強調し、過去分は落ち着いた色にする。
-        final isLatest = i == 0;
+        final isLatest = commentIndex == 0;
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 5),
           child: Row(
@@ -1495,6 +1532,8 @@ class KanpanicchiPanel extends StatefulWidget {
     required this.todos,
     required this.knowledge,
     required this.latestComment,
+    required this.commentHistory,
+    required this.haikuStatus,
     required this.character,
     required this.connKind,
     required this.onMove,
@@ -1509,6 +1548,8 @@ class KanpanicchiPanel extends StatefulWidget {
   final List<TodoItem> todos;
   final List<KnowledgeEntry> knowledge;
   final ActivityComment? latestComment;
+  final List<ActivityComment> commentHistory;
+  final HaikuStatus? haikuStatus;
   final DailyCharacter character;
 
   /// 今の接続経路（自宅LAN/外出先）。画面隅の小さなバッジ表示にのみ使う。
@@ -1577,6 +1618,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     )..repeat(reverse: true);
     _armIdleTimer();
     _armBlink();
+    _commentLog.addAll(widget.commentHistory.reversed);
     SharedPreferences.getInstance().then((p) {
       if (!mounted) return;
       p.remove('kanpanicchi_level');
@@ -1848,6 +1890,13 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     final comment = widget.latestComment;
     if (comment != null && !identical(comment, oldWidget.latestComment)) {
       _onComment(comment);
+    }
+    if (!identical(widget.commentHistory, oldWidget.commentHistory)) {
+      setState(() {
+        _commentLog
+          ..clear()
+          ..addAll(widget.commentHistory.reversed);
+      });
     }
   }
 
@@ -2201,6 +2250,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                           _CommentaryPanel(
                             comments: _commentLog,
                             color: _status.color,
+                            status: widget.haikuStatus,
                           ),
                         ],
                       ),

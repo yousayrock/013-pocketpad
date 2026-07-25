@@ -664,6 +664,8 @@ class _TrackpadScreenState extends State<TrackpadScreen>
   ClaudeNotifyEvent? _lastClaudeNotifyEvent;
   List<TodoItem> _lastTodos = [];
   ActivityComment? _lastActivityComment;
+  List<ActivityComment> _commentHistory = [];
+  HaikuStatus? _haikuStatus;
   List<KnowledgeEntry> _lastKnowledge = [];
   DailyCharacter _dailyCharacter = DailyCharacter.fallback;
   final SpeechToText _speech = SpeechToText();
@@ -717,6 +719,8 @@ class _TrackpadScreenState extends State<TrackpadScreen>
     _sendJson({'type': 'claude_todos_get'});
     // 資料室のナレッジ（日誌）も同じくスマホ主導で取りに行く。
     _sendJson({'type': 'claude_knowledge_get'});
+    _sendJson({'type': 'claude_activity_comments_get'});
+    _sendJson({'type': 'haiku_status_get'});
     _sendJson({'type': 'daily_character_get'});
   }
 
@@ -815,6 +819,16 @@ class _TrackpadScreenState extends State<TrackpadScreen>
       if (text.isNotEmpty) {
         setState(() => _lastActivityComment = ActivityComment(text: text));
       }
+    } else if (j['type'] == 'claude_activity_comments') {
+      final raw = (j['entries'] as List?) ?? const [];
+      setState(
+        () => _commentHistory = [
+          for (final e in raw)
+            ActivityComment.fromJson((e as Map).cast<String, dynamic>()),
+        ],
+      );
+    } else if (j['type'] == 'haiku_status') {
+      setState(() => _haikuStatus = HaikuStatus.fromJson(j));
     } else if (j['type'] == 'file_transfer_result' && mounted) {
       final ok = j['ok'] == true;
       final filename = (j['filename'] as String?) ?? '';
@@ -1113,6 +1127,8 @@ class _TrackpadScreenState extends State<TrackpadScreen>
           todos: _lastTodos,
           knowledge: _lastKnowledge,
           latestComment: _lastActivityComment,
+          commentHistory: _commentHistory,
+          haikuStatus: _haikuStatus,
           character: _dailyCharacter,
           connKind: widget.connKind,
           onMove: _move,

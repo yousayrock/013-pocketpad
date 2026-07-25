@@ -146,7 +146,11 @@ class WsServer
     private const int _recentCommentsKeep = 20;            // 直近何件をプロンプトに渡すか
     private const int _progressEveryN = 6;                 // 長いターン中、この件数ごとに途中経過を挟む
 
-    public WsServer(int port) => Port = port;
+    public WsServer(int port)
+    {
+        Port = port;
+        _recentComments.AddRange(CommentaryStore.Load().TakeLast(_recentCommentsKeep).Select(e => e.Text));
+    }
 
     public void Start()
     {
@@ -234,6 +238,8 @@ class WsServer
             {
                 enabled = settings.Enabled,
                 hasKey = !string.IsNullOrEmpty(settings.ApiKey),
+                paused = settings.Paused,
+                pauseReason = settings.PauseReason,
             }));
         });
 
@@ -254,7 +260,13 @@ class WsServer
                     var v = k.GetString();
                     if (!string.IsNullOrEmpty(v)) apiKey = v;
                 }
-                HaikuSettingsStore.Save(enabled, apiKey);
+                HaikuSettingsStore.Save(
+                    enabled,
+                    apiKey,
+                    paused: false,
+                    pauseReason: null,
+                    consecutiveFailures: 0);
+                await PushHaikuStatusAsync();
                 ctx.Response.ContentType = "application/json";
                 await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { ok = true }));
             }
@@ -625,6 +637,58 @@ class WsServer
         }
     }
 
+    public async Task<bool> PushHaikuStatusAsync()
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            var settings = HaikuSettingsStore.Load();
+            var reason = !settings.Enabled
+                ? "実況はオフになっています"
+                : settings.Paused
+                    ? settings.PauseReason ?? "実況は一時休止中です"
+                    : string.IsNullOrEmpty(settings.ApiKey)
+                        ? "実況が使えません（APIキーが未設定です）"
+                        : null;
+            await SendJsonAsync(conn, new
+            {
+                type = "haiku_status",
+                enabled = settings.Enabled,
+                paused = settings.Paused,
+                available = settings.Available,
+                reason,
+            });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Append("PushHaikuStatus", ex);
+            return false;
+        }
+    }
+
+    public async Task<bool> PushCommentaryLogAsync()
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            var entries = CommentaryStore.Load().Select(e => new
+            {
+                text = e.Text,
+                timestamp = e.Timestamp,
+            });
+            await SendJsonAsync(conn, new { type = "claude_activity_comments", entries });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Append("PushCommentaryLog", ex);
+            return false;
+        }
+    }
+
     /// <summary>接続中のスマホへ資料室のナレッジ一覧をプッシュ。claude_todosと同じく毎回全件を
     /// 送る方式（差分管理をせず、常に%APPDATA%\PocketPad\knowledge.jsonの現在の全内容を渡す）。</summary>
     public async Task<bool> PushClaudeKnowledgeAsync()
@@ -784,7 +848,7 @@ class WsServer
         }
 
         var settings = HaikuSettingsStore.Load();
-        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return;
+        if (!settings.Available) return;
 
         if (isFirstOfTurn)
         {
@@ -841,6 +905,7 @@ class WsServer
                 _recentComments.Add(comment);
                 while (_recentComments.Count > _recentCommentsKeep) _recentComments.RemoveAt(0);
             }
+            CommentaryStore.Append(new CommentaryEntry(comment, DateTimeOffset.Now.ToString("O")));
             return comment;
         }
         finally
@@ -970,11 +1035,11 @@ class WsServer
 
     /// <summary>Claude Haikuで、これから何をするか（1件のツール活動のみ）から「開始」実況を生成する。
     /// 実況OFF・APIキー未設定・失敗・タイムアウト時はnull。</summary>
-    private static async Task<string?> GenerateHaikuStartCommentaryAsync(
+    private async Task<string?> GenerateHaikuStartCommentaryAsync(
         string tool, string detail, string? cwd, IReadOnlyList<string> recentComments)
     {
         var settings = HaikuSettingsStore.Load();
-        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return null;
+        if (!settings.Available) return null;
 
         var project = string.IsNullOrEmpty(cwd) ? null : Path.GetFileName(cwd.TrimEnd('\\', '/'));
         var verb = ToolVerb(tool);
@@ -987,11 +1052,11 @@ class WsServer
 
     /// <summary>Claude Haikuで、長いターンの途中経過（直近数件のツール活動）から「まだやってるよ」
     /// 実況を生成する。結果は語らない。実況OFF・APIキー未設定・失敗・タイムアウト時はnull。</summary>
-    private static async Task<string?> GenerateHaikuProgressCommentaryAsync(
+    private async Task<string?> GenerateHaikuProgressCommentaryAsync(
         IReadOnlyList<(string tool, string detail)> recentActivities, string? cwd, IReadOnlyList<string> recentComments)
     {
         var settings = HaikuSettingsStore.Load();
-        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return null;
+        if (!settings.Available) return null;
         if (recentActivities.Count == 0) return null;
 
         var project = string.IsNullOrEmpty(cwd) ? null : Path.GetFileName(cwd.TrimEnd('\\', '/'));
@@ -1010,12 +1075,12 @@ class WsServer
 
     /// <summary>Claude Haikuで、Claude自身の実際の最終応答（≒作業報告）を実況口調に変換する
     /// 「終了」実況を生成する。実況OFF・APIキー未設定・失敗・タイムアウト時はnull。</summary>
-    private static async Task<string?> GenerateHaikuEndCommentaryAsync(
+    private async Task<string?> GenerateHaikuEndCommentaryAsync(
         string lastAssistantMessage, IReadOnlyList<(string tool, string detail)> activities,
         string? cwd, IReadOnlyList<string> recentComments)
     {
         var settings = HaikuSettingsStore.Load();
-        if (!settings.Enabled || string.IsNullOrEmpty(settings.ApiKey)) return null;
+        if (!settings.Available) return null;
 
         var project = string.IsNullOrEmpty(cwd) ? null : Path.GetFileName(cwd.TrimEnd('\\', '/'));
 
@@ -1048,29 +1113,130 @@ class WsServer
         return rb.ToString();
     }
 
-    private static async Task<string?> CallHaikuAsync(string apiKey, string systemPrompt, string userContent, int maxTokens)
+    private async Task<string?> CallHaikuAsync(string apiKey, string systemPrompt, string userContent, int maxTokens)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post, "v1/messages");
-        req.Headers.Add("x-api-key", apiKey);
-        req.Headers.Add("anthropic-version", "2023-06-01");
-        req.Content = JsonContent(new
+        for (var attempt = 1; attempt <= 3; attempt++)
         {
-            model = "claude-haiku-4-5-20251001",
-            max_tokens = maxTokens,
-            temperature = 0.8,
-            system = systemPrompt,
-            messages = new[] { new { role = "user", content = userContent } },
-        });
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Post, "v1/messages");
+                req.Headers.Add("x-api-key", apiKey);
+                req.Headers.Add("anthropic-version", "2023-06-01");
+                req.Content = JsonContent(new
+                {
+                    model = "claude-haiku-4-5-20251001",
+                    max_tokens = maxTokens,
+                    temperature = 0.8,
+                    system = systemPrompt,
+                    messages = new[] { new { role = "user", content = userContent } },
+                });
+                using var resp = await _anthropicHttp.SendAsync(req);
+                var body = await resp.Content.ReadAsStringAsync();
+                var requestId = resp.Headers.TryGetValues("request-id", out var ids)
+                    ? ids.FirstOrDefault()
+                    : resp.Headers.TryGetValues("x-request-id", out var xids) ? xids.FirstOrDefault() : null;
+                if (!resp.IsSuccessStatusCode)
+                {
+                    var errorType = ExtractHaikuErrorType(body);
+                    var failure = new HaikuApiException(
+                        (int)resp.StatusCode, errorType, body, requestId);
+                    ErrorLog.Append("CallHaikuAsync", failure);
+                    if ((int)resp.StatusCode is 401 or 402 or 403)
+                    {
+                        await PauseHaikuAsync(UserReason((int)resp.StatusCode, body));
+                        throw failure;
+                    }
+                    if ((int)resp.StatusCode == 429 || (int)resp.StatusCode >= 500)
+                    {
+                        if (attempt < 3)
+                        {
+                            await Task.Delay(TimeSpan.FromMilliseconds(500 * (1 << (attempt - 1))));
+                            continue;
+                        }
+                        await RecordTransientFailureAsync(UserReason((int)resp.StatusCode, body));
+                    }
+                    throw failure;
+                }
 
-        using var resp = await _anthropicHttp.SendAsync(req);
-        if (!resp.IsSuccessStatusCode) return null;
+                using var doc = JsonDocument.Parse(body);
+                var content = doc.RootElement.GetProperty("content");
+                if (content.ValueKind != JsonValueKind.Array || content.GetArrayLength() == 0) return null;
+                var text = content[0].TryGetProperty("text", out var t) ? t.GetString() : null;
+                var current = HaikuSettingsStore.Load();
+                if (current.ConsecutiveFailures != 0)
+                    HaikuSettingsStore.Save(current.Enabled, null, consecutiveFailures: 0);
+                return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            {
+                ErrorLog.Append("CallHaikuAsync.Transport", ex);
+                if (attempt < 3)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(500 * (1 << (attempt - 1))));
+                    continue;
+                }
+                await RecordTransientFailureAsync("実況を一時休止しました（通信障害が続いています）");
+                throw;
+            }
+        }
+        return null;
+    }
 
-        using var stream = await resp.Content.ReadAsStreamAsync();
-        using var doc = await JsonDocument.ParseAsync(stream);
-        var content = doc.RootElement.GetProperty("content");
-        if (content.ValueKind != JsonValueKind.Array || content.GetArrayLength() == 0) return null;
-        var text = content[0].TryGetProperty("text", out var t) ? t.GetString() : null;
-        return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+    private static string ExtractHaikuErrorType(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("error", out var error)
+                && error.TryGetProperty("type", out var type)) return type.GetString() ?? "unknown";
+            if (root.TryGetProperty("type", out var topType)) return topType.GetString() ?? "unknown";
+        }
+        catch (JsonException) { }
+        return "unknown";
+    }
+
+    private static string UserReason(int status, string body) => status switch
+    {
+        401 => "実況が使えません（APIキーを確認してください）",
+        402 => "実況が使えません（APIの残高不足です）",
+        403 => "実況が使えません（APIの利用権限がありません）",
+        429 => "実況を一時休止しました（APIが混雑しています）",
+        _ when status >= 500 => "実況を一時休止しました（API側の障害が続いています）",
+        _ => body.Contains("credit balance", StringComparison.OrdinalIgnoreCase)
+            ? "実況が使えません（APIの残高不足です）"
+            : "実況を一時休止しました（APIエラーが続いています）",
+    };
+
+    private async Task PauseHaikuAsync(string reason)
+    {
+        var current = HaikuSettingsStore.Load();
+        HaikuSettingsStore.Save(current.Enabled, null, paused: true, pauseReason: reason);
+        await PushHaikuStatusAsync();
+    }
+
+    private async Task RecordTransientFailureAsync(string reason)
+    {
+        var current = HaikuSettingsStore.Load();
+        var failures = current.ConsecutiveFailures + 1;
+        HaikuSettingsStore.Save(
+            current.Enabled,
+            null,
+            paused: failures >= 3,
+            pauseReason: failures >= 3 ? reason : null,
+            consecutiveFailures: failures);
+        if (failures >= 3) await PushHaikuStatusAsync();
+    }
+
+    private sealed class HaikuApiException(
+        int statusCode, string errorType, string responseBody, string? requestId)
+        : Exception(
+            $"status={statusCode}; errorType={errorType}; request-id={requestId ?? "(none)"}; body={responseBody}")
+    {
+        public int StatusCode { get; } = statusCode;
+        public string ErrorType { get; } = errorType;
+        public string ResponseBody { get; } = responseBody;
+        public string? RequestId { get; } = requestId;
     }
 
     private static HttpContent JsonContent(object payload)
@@ -1279,6 +1445,14 @@ class WsServer
             case "claude_knowledge_get":
                 // 資料室のナレッジ同期（claude_todos_getと同じスマホ主導pull方式）。
                 await PushClaudeKnowledgeAsync();
+                break;
+
+            case "haiku_status_get":
+                await PushHaikuStatusAsync();
+                break;
+
+            case "claude_activity_comments_get":
+                await PushCommentaryLogAsync();
                 break;
 
             case "daily_character_get":

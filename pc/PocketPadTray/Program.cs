@@ -111,11 +111,17 @@ class TrayContext : ApplicationContext
         {
             Checked = HaikuSettingsStore.Load().Enabled,
         };
-        haikuItem.Click += (_, _) =>
+        haikuItem.Click += async (_, _) =>
         {
             var cur = HaikuSettingsStore.Load();
-            HaikuSettingsStore.Save(!cur.Enabled, null);
+            HaikuSettingsStore.Save(
+                !cur.Enabled,
+                null,
+                paused: false,
+                pauseReason: null,
+                consecutiveFailures: 0);
             haikuItem.Checked = !cur.Enabled;
+            await server.PushHaikuStatusAsync();
         };
         menu.Items.Add(haikuItem);
         menu.Items.Add(new ToolStripSeparator());
