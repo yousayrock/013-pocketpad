@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show listEquals, mapEquals;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -107,6 +108,104 @@ class KnowledgeEntry {
   DateTime? get time => DateTime.tryParse(timestamp);
 }
 
+class DailyCharacter {
+  const DailyCharacter({
+    required this.date,
+    required this.status,
+    required this.theme,
+    required this.reason,
+    required this.palette,
+    required this.bg,
+    required this.dot,
+    required this.stand,
+    required this.walk,
+    required this.blink,
+  });
+
+  factory DailyCharacter.fromJson(Map<String, dynamic> j) {
+    String stringField(String key, String fallbackValue) =>
+        j[key] is String ? j[key] as String : fallbackValue;
+    Color colorField(String key, Color fallbackValue) =>
+        _parseColor(j[key]) ?? fallbackValue;
+    List<String> rowsField(String key, List<String> fallbackValue) {
+      final value = j[key];
+      if (value is! List || value.length != 8) return fallbackValue;
+      final rows = <String>[];
+      for (final row in value) {
+        if (row is! String || row.length != 7) return fallbackValue;
+        rows.add(row);
+      }
+      return rows;
+    }
+
+    var palette = fallback.palette;
+    final rawPalette = j['palette'];
+    if (rawPalette is Map) {
+      final parsed = <String, Color>{};
+      var valid = true;
+      for (final entry in rawPalette.entries) {
+        final color = _parseColor(entry.value);
+        if (color == null) {
+          valid = false;
+          break;
+        }
+        parsed[entry.key.toString()] = color;
+      }
+      if (valid && parsed.isNotEmpty) palette = parsed;
+    }
+    final rawStatus = j['status'];
+    final status =
+        rawStatus == 'ready' ||
+            rawStatus == 'generating' ||
+            rawStatus == 'default'
+        ? rawStatus as String
+        : fallback.status;
+    return DailyCharacter(
+      date: stringField('date', fallback.date),
+      status: status,
+      theme: stringField('theme', fallback.theme),
+      reason: stringField('reason', fallback.reason),
+      palette: palette,
+      bg: colorField('bg', fallback.bg),
+      dot: colorField('dot', fallback.dot),
+      stand: rowsField('stand', fallback.stand),
+      walk: rowsField('walk', fallback.walk),
+      blink: rowsField('blink', fallback.blink),
+    );
+  }
+
+  static Color? _parseColor(dynamic value) {
+    if (value is! String || !RegExp(r'^#[0-9A-Fa-f]{6}$').hasMatch(value)) {
+      return null;
+    }
+    return Color(0xFF000000 | int.parse(value.substring(1), radix: 16));
+  }
+
+  static const fallback = DailyCharacter(
+    date: '',
+    status: 'default',
+    theme: 'いつものかんぱにっち',
+    reason: '',
+    palette: _defaultSpritePalette,
+    bg: Color(0xFF070B16),
+    dot: Colors.white,
+    stand: _spriteStand,
+    walk: _spriteWalk,
+    blink: _spriteStandBlink,
+  );
+
+  final String date;
+  final String status;
+  final String theme;
+  final String reason;
+  final Map<String, Color> palette;
+  final Color bg;
+  final Color dot;
+  final List<String> stand;
+  final List<String> walk;
+  final List<String> blink;
+}
+
 /// オフィス内の「持ち場」。キャラクターがこの位置(Alignment)へ移動する。
 class _Zone {
   const _Zone(this.align, this.propIcon, this.verb, this.roomName, this.color);
@@ -181,55 +280,6 @@ _Zone _zoneFor(String tool) => _zones[tool] ?? _zoneWorking;
 /// "HH:mm:ss"形式の時刻表示。実況ログ・部屋詳細・資料室で共通に使う。
 String _fmtTime(DateTime t) =>
     '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:${t.second.toString().padLeft(2, '0')}';
-
-// ─────────────────────────────────────── 育成（レベル/経験値）
-// 「タスクをこなすと経験値が増える」の経験値量。ツール呼び出し1回ごとに少量、
-// ターン完了（stop）でまとまった量を加算する。承認待ち（notification）は
-// まだ完了していない作業なので加算しない。
-int _xpForTool(String tool) {
-  switch (tool) {
-    case 'Edit':
-    case 'Write':
-    case 'NotebookEdit':
-    case 'Bash':
-      return 2;
-    case 'Task':
-      return 3;
-    case 'Read':
-    case 'Grep':
-    case 'Glob':
-    case 'WebSearch':
-    case 'WebFetch':
-      return 1;
-    default:
-      return 1;
-  }
-}
-
-const _xpPerStop = 20;
-
-/// TODOを1件「完了」にするごとのXP。TodoWriteの進捗にも育成が連動する。
-const _xpPerTodo = 5;
-
-/// 1ターン中にツールを何回使ったか（=仕事の大変さの目安）に応じたボーナスXP。
-/// 難しい仕事＝ツール呼び出しが多いターンほど、完了時にまとまった追加報酬を出す。
-int _stopBonus(int toolCallsThisTurn) {
-  if (toolCallsThisTurn >= 15) return 25;
-  if (toolCallsThisTurn >= 8) return 10;
-  return 0;
-}
-
-/// レベルNからN+1に上がるのに必要な経験値。
-int _xpToNext(int level) => 80 + (level - 1) * 20;
-
-/// レベル帯ごとの役職（「AI社員」が出世していく体で）。
-String _rankFor(int level) {
-  if (level >= 20) return '社長';
-  if (level >= 15) return '部長';
-  if (level >= 10) return '課長';
-  if (level >= 5) return '主任';
-  return '新人';
-}
 
 /// tool_name/detailから「今これをしています」がわかる、誰にでもわかる簡単な一文を作る。
 /// ファイル名やコマンドの生の文字列はあえて出さず、小学生でも意味がわかる
@@ -367,48 +417,22 @@ const _spriteStandBlink = [
   '..1.1..',
 ];
 
-const _spritePalette = <String, Color>{
+const _defaultSpritePalette = <String, Color>{
   '1': _kAccent,
   '2': _kMagenta,
   '0': Colors.black,
-  '3': Color(0xFF1A2340), // ネクタイ（Lv5〜）
-  '4': Color(0xFFFFC72C), // バッジ・王冠（Lv10〜/Lv20〜）
 };
-
-/// レベル帯に応じて見た目に「出世」の装飾を足していく（既存のスプライト定数
-/// 自体は変更せず、行を書き換え/追加するだけの加算方式）。
-List<String> _withTie(List<String> rows) {
-  if (rows.length <= 5) return rows;
-  final r = List<String>.from(rows);
-  r[5] = r[5].replaceRange(3, 4, '3');
-  return r;
-}
-
-List<String> _withBadge(List<String> rows) {
-  if (rows.length <= 4) return rows;
-  final r = List<String>.from(rows);
-  r[4] = r[4].replaceRange(5, 6, '4');
-  return r;
-}
-
-List<String> _withCrown(List<String> rows) => ['..444..', ...rows];
-
-List<String> _tieredSprite(int level, List<String> base) {
-  var rows = base;
-  if (level >= 5) rows = _withTie(rows);
-  if (level >= 10) rows = _withBadge(rows);
-  if (level >= 20) rows = _withCrown(rows);
-  return rows;
-}
 
 class _PixelSprite extends StatelessWidget {
   const _PixelSprite({
     required this.rows,
     required this.glow,
+    required this.palette,
     this.pixelSize = 6.0,
   });
   final List<String> rows;
   final Color glow;
+  final Map<String, Color> palette;
   final double pixelSize;
 
   @override
@@ -418,16 +442,19 @@ class _PixelSprite extends StatelessWidget {
     return SizedBox(
       width: w,
       height: h,
-      child: CustomPaint(painter: _SpritePainter(rows, pixelSize, glow)),
+      child: CustomPaint(
+        painter: _SpritePainter(rows, pixelSize, glow, palette),
+      ),
     );
   }
 }
 
 class _SpritePainter extends CustomPainter {
-  _SpritePainter(this.rows, this.pixelSize, this.glow);
+  _SpritePainter(this.rows, this.pixelSize, this.glow, this.palette);
   final List<String> rows;
   final double pixelSize;
   final Color glow;
+  final Map<String, Color> palette;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -435,7 +462,7 @@ class _SpritePainter extends CustomPainter {
     for (var y = 0; y < rows.length; y++) {
       final row = rows[y];
       for (var x = 0; x < row.length; x++) {
-        final color = _spritePalette[row[x]];
+        final color = palette[row[x]];
         if (color == null) continue;
         paint.color = color;
         canvas.drawRect(
@@ -448,17 +475,21 @@ class _SpritePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _SpritePainter oldDelegate) =>
-      oldDelegate.rows != rows || oldDelegate.glow != glow;
+      !listEquals(oldDelegate.rows, rows) ||
+      oldDelegate.pixelSize != pixelSize ||
+      oldDelegate.glow != glow ||
+      !mapEquals(oldDelegate.palette, palette);
 }
 
 /// たまごっちの筐体っぽい「床」の質感を出すドット格子。
 class _FloorPainter extends CustomPainter {
-  const _FloorPainter();
+  const _FloorPainter(this.dotColor);
+  final Color dotColor;
   static const _step = 14.0;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.white.withValues(alpha: 0.05);
+    final paint = Paint()..color = dotColor.withValues(alpha: 0.05);
     for (var y = _step / 2; y < size.height; y += _step) {
       for (var x = _step / 2; x < size.width; x += _step) {
         canvas.drawCircle(Offset(x, y), 1.1, paint);
@@ -467,114 +498,8 @@ class _FloorPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _FloorPainter oldDelegate) => false;
-}
-
-/// レベルアップ時に一瞬だけ出る祝福バナー。
-class _LevelUpBanner extends StatefulWidget {
-  const _LevelUpBanner({
-    super.key,
-    required this.name,
-    required this.level,
-    required this.rank,
-    required this.onDone,
-  });
-
-  final String name;
-  final int level;
-  final String rank;
-  final VoidCallback onDone;
-
-  @override
-  State<_LevelUpBanner> createState() => _LevelUpBannerState();
-}
-
-class _LevelUpBannerState extends State<_LevelUpBanner>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _scale;
-  late final Animation<double> _opacity;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1900),
-    );
-    _scale = TweenSequence([
-      TweenSequenceItem(
-        tween: Tween(
-          begin: 0.8,
-          end: 1.05,
-        ).chain(CurveTween(curve: Curves.easeOut)),
-        weight: 350,
-      ),
-      TweenSequenceItem(tween: Tween(begin: 1.05, end: 1.0), weight: 150),
-      TweenSequenceItem(tween: ConstantTween(1.0), weight: 1400),
-    ]).animate(_controller);
-    _opacity = TweenSequence([
-      TweenSequenceItem(tween: Tween(begin: 0.0, end: 1.0), weight: 200),
-      TweenSequenceItem(tween: ConstantTween(1.0), weight: 1300),
-      TweenSequenceItem(tween: Tween(begin: 1.0, end: 0.0), weight: 400),
-    ]).animate(_controller);
-    _controller.forward().whenComplete(widget.onDone);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => Center(
-    child: AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) => Opacity(
-        opacity: _opacity.value,
-        child: Transform.scale(scale: _scale.value, child: child),
-      ),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 20),
-        decoration: BoxDecoration(
-          color: const Color(0xFF0A1020),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: _kAccent, width: 2),
-          boxShadow: [
-            BoxShadow(
-              color: _kAccent.withValues(alpha: 0.5),
-              blurRadius: 30,
-              spreadRadius: 2,
-            ),
-          ],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'LEVEL UP!',
-              style: TextStyle(
-                color: _kMagenta,
-                fontWeight: FontWeight.w900,
-                fontSize: 22,
-                letterSpacing: 2,
-              ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '${widget.name}  Lv.${widget.level} ${widget.rank}',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-                fontSize: 18,
-              ),
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
+  bool shouldRepaint(covariant _FloorPainter oldDelegate) =>
+      oldDelegate.dotColor != dotColor;
 }
 
 /// 部屋（持ち場）1つ分のカード。什器アイコン+ラベルを部屋の色でタグ付けする。
@@ -656,29 +581,29 @@ class _ConnKindBadge extends StatelessWidget {
   }
 }
 
-/// オフィス上部の育成ステータス表示。アバターチップ + レベル/役職 + 経験値バー。
+/// オフィス上部の日替わりキャラクター表示。
 class _StatsHeader extends StatelessWidget {
   const _StatsHeader({
     required this.name,
-    required this.level,
-    required this.xp,
-    required this.xpToNext,
-    required this.rank,
+    required this.character,
     required this.color,
     required this.onNameTap,
+    required this.onThemeTap,
   });
 
   final String name;
-  final int level;
-  final int xp;
-  final int xpToNext;
-  final String rank;
+  final DailyCharacter character;
   final Color color;
   final VoidCallback onNameTap;
+  final VoidCallback onThemeTap;
 
   @override
   Widget build(BuildContext context) {
-    final progress = (xp / xpToNext).clamp(0.0, 1.0);
+    final reason = switch (character.status) {
+      'generating' => '今日のキャラを準備中…',
+      'default' => '今日のキャラはまだ作られていないよ',
+      _ => character.reason,
+    };
     return Padding(
       // 右上のトラックパッド切替ボタン（Positioned top:4,right:4、タップ領域48x48）と
       // 被らないよう、右側は多めに余白を取る。
@@ -695,7 +620,11 @@ class _StatsHeader extends StatelessWidget {
               border: Border.all(color: color.withValues(alpha: 0.5)),
             ),
             child: FittedBox(
-              child: _PixelSprite(rows: _spriteStand, glow: color),
+              child: _PixelSprite(
+                rows: character.stand,
+                glow: color,
+                palette: character.palette,
+              ),
             ),
           ),
           const SizedBox(width: 10),
@@ -707,27 +636,16 @@ class _StatsHeader extends StatelessWidget {
                   onTap: onNameTap,
                   child: Row(
                     children: [
-                      // 名前は自由入力で長くなりうるため横スクロールで見せる。
-                      // Lv./役職は常に見えていてほしいのでスクロール対象の外に固定する。
                       Flexible(
-                        child: SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Text(
-                            name,
-                            style: TextStyle(
-                              color: color,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                            ),
+                        child: Text(
+                          '$name / ${character.theme}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: color,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
                           ),
-                        ),
-                      ),
-                      Text(
-                        ' Lv.$level $rank',
-                        style: TextStyle(
-                          color: color,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
                         ),
                       ),
                       const SizedBox(width: 4),
@@ -740,36 +658,14 @@ class _StatsHeader extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 5),
-                Stack(
-                  children: [
-                    Container(
-                      height: 6,
-                      decoration: BoxDecoration(
-                        color: Colors.white12,
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                    ),
-                    TweenAnimationBuilder<double>(
-                      tween: Tween(begin: 0, end: progress),
-                      duration: const Duration(milliseconds: 400),
-                      curve: Curves.easeOut,
-                      builder: (context, value, _) => FractionallySizedBox(
-                        widthFactor: value,
-                        child: Container(
-                          height: 6,
-                          decoration: BoxDecoration(
-                            color: color,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  '$xp/$xpToNext',
-                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                GestureDetector(
+                  onTap: onThemeTap,
+                  child: Text(
+                    reason,
+                    style: const TextStyle(color: Colors.white54, fontSize: 11),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ),
               ],
             ),
@@ -781,7 +677,7 @@ class _StatsHeader extends StatelessWidget {
 }
 
 /// 下半分の「TODOリスト」。Claude Code自身のTodoWriteの進捗をそのまま見せる
-/// （未着手/実行中/完了）。完了した分は_onTodosUpdatedでXPにも反映される。
+/// （未着手/実行中/完了）。
 class _TodoPanel extends StatefulWidget {
   const _TodoPanel({required this.todos, required this.color});
   final List<TodoItem> todos;
@@ -1549,8 +1445,8 @@ class _KnowledgeCard extends StatelessWidget {
   }
 }
 
-/// 「かんぱにっち」ページ。Claude Codeが今何をしているかをドット絵キャラクターで見せながら、
-/// タスクをこなすたびにユーザーと一緒にレベルアップしていく育成要素つきビューワー。
+/// 「かんぱにっち」ページ。Claude Codeが今何をしているかを日替わりの
+/// ドット絵キャラクターで見せるビューワー。
 /// オフィス内の持ち場（編集/コマンド/調査/委任/待機）を活動に応じて移動する。
 /// 上半分はデフォルトでこのオフィス表示、右上のボタンでトラックパッドに開閉できる。
 class KanpanicchiPanel extends StatefulWidget {
@@ -1561,6 +1457,7 @@ class KanpanicchiPanel extends StatefulWidget {
     required this.todos,
     required this.knowledge,
     required this.latestComment,
+    required this.character,
     required this.connKind,
     required this.onMove,
     required this.onScroll,
@@ -1574,6 +1471,7 @@ class KanpanicchiPanel extends StatefulWidget {
   final List<TodoItem> todos;
   final List<KnowledgeEntry> knowledge;
   final ActivityComment? latestComment;
+  final DailyCharacter character;
 
   /// 今の接続経路（自宅LAN/外出先）。画面隅の小さなバッジ表示にのみ使う。
   final ConnKind connKind;
@@ -1602,8 +1500,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   );
   // 部屋タップで詳細を見せるための、部屋ごとの直近の活動（生のツール/対象/時刻）。
   final Map<String, ClaudeActivity> _lastActivityByRoom = {};
-  // 今のターン（次のstopまで）で何回ツールを使ったか。完了時のボーナスXP判定に使う。
-  int _toolCallsSinceStop = 0;
   // 直近の活動の一言。アイドル判定（30秒操作なし）になった時、ただ「待機中」に
   // するのではなく「ビルド中でしばらく時間がかかっている」等、何を待っているか
   // 分かるようにするために使う。ターン完了(stop)でクリアする。
@@ -1631,26 +1527,8 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   );
   String? _marqueeLabelSeen;
   int _marqueeGeneration = 0;
-  // レベルアップ演出は外部Overlayへ出さず、このパネルのStack内に描画する。
-  // 一部端末でOverlayの合成レイヤー追加時に旧フレームが縦に残るため。
-  bool _showingLevelUp = false;
-  int _levelUpGeneration = 0;
-
-  // ── 育成（レベル/経験値）。永続化キーはshared_preferencesの他設定と同じ
-  // プリミティブキー方式（AppSettingsのJSON blobほど複雑な構造ではないため）。
-  static const _kLevelKey = 'kanpanicchi_level';
-  static const _kXpKey = 'kanpanicchi_xp';
-  static const _kLifetimeKey = 'kanpanicchi_lifetime_events';
   static const _kNameKey = 'kanpanicchi_display_name';
-  int _level = 1;
-  int _xp = 0;
-  int _lifetimeEvents = 0;
   String _displayName = kCharacterName;
-  // ツール呼び出しの経験値ファーミング対策: 直近の付与時刻と、直近60秒間に
-  // 経験値を付与したツール呼び出し回数を覚えておき、連打を弾く。
-  // stopイベント（ターン完了）はターン単位で自然にレート制限されるため対象外。
-  DateTime? _lastToolXpAt;
-  final List<DateTime> _xpTimestamps = [];
 
   @override
   void initState() {
@@ -1663,10 +1541,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     _armBlink();
     SharedPreferences.getInstance().then((p) {
       if (!mounted) return;
+      p.remove('kanpanicchi_level');
+      p.remove('kanpanicchi_xp');
+      p.remove('kanpanicchi_lifetime_events');
       setState(() {
-        _level = p.getInt(_kLevelKey) ?? 1;
-        _xp = p.getInt(_kXpKey) ?? 0;
-        _lifetimeEvents = p.getInt(_kLifetimeKey) ?? 0;
         final savedName = p.getString(_kNameKey);
         if (savedName != null && savedName.isNotEmpty) _displayName = savedName;
       });
@@ -1717,54 +1595,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
         setState(() => _blinking = false);
         _armBlink();
       });
-    });
-  }
-
-  void _saveProgress() {
-    SharedPreferences.getInstance().then((p) {
-      p.setInt(_kLevelKey, _level);
-      p.setInt(_kXpKey, _xp);
-      p.setInt(_kLifetimeKey, _lifetimeEvents);
-    });
-  }
-
-  /// 経験値を加算し、レベルアップを検出する。tool!=nullならツール呼び出し由来
-  /// （ファーミング対策のスロットル対象）、nullならstopイベント由来（対象外）。
-  void _awardXp(int amount, {String? tool}) {
-    if (tool != null) {
-      final now = DateTime.now();
-      if (_lastToolXpAt != null &&
-          now.difference(_lastToolXpAt!) < const Duration(seconds: 3)) {
-        return;
-      }
-      _xpTimestamps.removeWhere(
-        (t) => now.difference(t) > const Duration(seconds: 60),
-      );
-      if (_xpTimestamps.length >= 20) return;
-      _lastToolXpAt = now;
-      _xpTimestamps.add(now);
-    }
-    var xp = _xp + amount;
-    var level = _level;
-    var leveledUp = false;
-    while (xp >= _xpToNext(level)) {
-      xp -= _xpToNext(level);
-      level++;
-      leveledUp = true;
-    }
-    setState(() {
-      _xp = xp;
-      _level = level;
-      _lifetimeEvents++;
-    });
-    _saveProgress();
-    if (leveledUp) _showLevelUpBanner();
-  }
-
-  void _showLevelUpBanner() {
-    setState(() {
-      _levelUpGeneration++;
-      _showingLevelUp = true;
     });
   }
 
@@ -1891,6 +1721,44 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     );
   }
 
+  void _showThemeDetail() {
+    final character = widget.character;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0A1020),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              character.theme,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              character.reason,
+              style: const TextStyle(color: Colors.white70, fontSize: 14),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              character.date,
+              style: const TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// 資料室から呼ぶ、ナレッジ棚（日誌一覧）ページを開く。
   void _showKnowledgeShelf(_Zone zone) {
     Navigator.of(context).push(
@@ -1939,9 +1807,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     if (notify != null && !identical(notify, oldWidget.latestNotify)) {
       _onNotify(notify);
     }
-    if (!identical(widget.todos, oldWidget.todos)) {
-      _onTodosUpdated(oldWidget.todos, widget.todos);
-    }
     final comment = widget.latestComment;
     if (comment != null && !identical(comment, oldWidget.latestComment)) {
       _onComment(comment);
@@ -1961,21 +1826,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
       _commentLog.insert(0, c);
       if (_commentLog.length > 30) _commentLog.removeLast();
     });
-  }
-
-  /// TODOが新たに完了（pending/in_progress → completed）になった分だけXPを渡す。
-  /// contentの文字列で前後の対応を取る（TodoWriteはターン内で同じ内容を使い回すため）。
-  void _onTodosUpdated(List<TodoItem> oldTodos, List<TodoItem> newTodos) {
-    final wasCompleted = {
-      for (final t in oldTodos)
-        if (t.status == 'completed') t.content,
-    };
-    final newlyCompleted = newTodos
-        .where(
-          (t) => t.status == 'completed' && !wasCompleted.contains(t.content),
-        )
-        .length;
-    if (newlyCompleted > 0) _awardXp(_xpPerTodo * newlyCompleted);
   }
 
   void _armIdleTimer() {
@@ -2020,15 +1870,15 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     _lastActivityLabel = label;
     _doneRevertTimer?.cancel();
     _armIdleTimer();
-    _toolCallsSinceStop++;
-    _awardXp(_xpForTool(a.tool), tool: a.tool);
   }
 
   void _onNotify(ClaudeNotifyEvent n) {
     final isWaiting = n.event == 'notification';
     final icon = isWaiting ? Icons.notifications_active : Icons.check_circle;
     final color = isWaiting ? _kMagenta : _kAccent;
-    var label = isWaiting ? '承認を待っています: ${n.message}' : '完了しました: ${n.message}';
+    final label = isWaiting
+        ? '承認を待っています: ${n.message}'
+        : '完了しました: ${n.message}';
     _doneRevertTimer?.cancel();
     if (!isWaiting) {
       // ターンが完了した＝もう「待っている」ことは無いので、次にアイドルに
@@ -2038,10 +1888,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
       _doneRevertTimer = Timer(const Duration(seconds: 3), () {
         if (mounted) _moveTo(_zoneIdle, _zoneIdle.color, _zoneIdle.verb);
       });
-      final bonus = _stopBonus(_toolCallsSinceStop);
-      _toolCallsSinceStop = 0;
-      if (bonus > 0) label = '$label（大変な仕事お疲れさま！ボーナスXP+$bonus）';
-      _awardXp(_xpPerStop + bonus);
     }
     setState(() => _status = _Status(icon: icon, color: color, label: label));
     _armIdleTimer();
@@ -2113,6 +1959,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   @override
   Widget build(BuildContext context) {
     _maybeStartMarquee(_status.label);
+    final character = widget.character;
     return Stack(
       children: [
         Positioned.fill(
@@ -2157,7 +2004,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                 ),
                                 child: Container(
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF070B16),
+                                    color: character.bg,
                                     borderRadius: BorderRadius.circular(19),
                                     border: Border.all(color: Colors.white10),
                                   ),
@@ -2165,21 +2012,21 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                     children: [
                                       _StatsHeader(
                                         name: _displayName,
-                                        level: _level,
-                                        xp: _xp,
-                                        xpToNext: _xpToNext(_level),
-                                        rank: _rankFor(_level),
+                                        character: character,
                                         color: _status.color,
                                         onNameTap: _renameCharacter,
+                                        onThemeTap: _showThemeDetail,
                                       ),
                                       Expanded(
                                         child: Stack(
                                           children: [
                                             // たまごっちの筐体っぽい床の質感
-                                            const Center(
+                                            Center(
                                               child: SizedBox.expand(
                                                 child: CustomPaint(
-                                                  painter: _FloorPainter(),
+                                                  painter: _FloorPainter(
+                                                    character.dot,
+                                                  ),
                                                 ),
                                               ),
                                             ),
@@ -2233,15 +2080,15 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                                   },
                                                   child: _PixelSprite(
                                                     pixelSize: 3.5,
-                                                    rows: _tieredSprite(
-                                                      _level,
-                                                      _walking && !_walkFrameA
-                                                          ? _spriteWalk
-                                                          : (_blinking
-                                                                ? _spriteStandBlink
-                                                                : _spriteStand),
-                                                    ),
+                                                    rows:
+                                                        _walking && !_walkFrameA
+                                                        ? character.walk
+                                                        : (_blinking
+                                                              ? character.blink
+                                                              : character
+                                                                    .stand),
                                                     glow: _status.color,
+                                                    palette: character.palette,
                                                   ),
                                                 ),
                                               ),
@@ -2326,20 +2173,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
             ],
           ),
         ),
-        if (_showingLevelUp)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: _LevelUpBanner(
-                key: ValueKey(_levelUpGeneration),
-                name: _displayName,
-                level: _level,
-                rank: _rankFor(_level),
-                onDone: () {
-                  if (mounted) setState(() => _showingLevelUp = false);
-                },
-              ),
-            ),
-          ),
       ],
     );
   }

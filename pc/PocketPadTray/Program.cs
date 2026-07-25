@@ -90,6 +90,15 @@ class TrayContext : ApplicationContext
             System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
                 $"http://localhost:{server.Port}/") { UseShellExecute = true }));
         menu.Items.Add("エラーログを開く", null, (_, _) => ShowErrorLog());
+        menu.Items.Add("今日のキャラを作り直す", null, (_, _) =>
+        {
+            DailyCharacterService.ForceRegenerate();
+            MessageBox.Show(
+                "作成を始めました(数分かかります)",
+                "PocketPad",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        });
         menu.Items.Add(new ToolStripSeparator());
         var startupItem = new ToolStripMenuItem("Windows起動時に自動起動")
         {

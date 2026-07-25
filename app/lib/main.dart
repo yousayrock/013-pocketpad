@@ -665,6 +665,7 @@ class _TrackpadScreenState extends State<TrackpadScreen>
   List<TodoItem> _lastTodos = [];
   ActivityComment? _lastActivityComment;
   List<KnowledgeEntry> _lastKnowledge = [];
+  DailyCharacter _dailyCharacter = DailyCharacter.fallback;
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
   bool _micListening = false;
@@ -716,6 +717,7 @@ class _TrackpadScreenState extends State<TrackpadScreen>
     _sendJson({'type': 'claude_todos_get'});
     // 資料室のナレッジ（日誌）も同じくスマホ主導で取りに行く。
     _sendJson({'type': 'claude_knowledge_get'});
+    _sendJson({'type': 'daily_character_get'});
   }
 
   /// PCからの受信処理。スクショ結果を受け取ったらプレビュー画面へ。
@@ -806,6 +808,8 @@ class _TrackpadScreenState extends State<TrackpadScreen>
             KnowledgeEntry.fromJson((e as Map).cast<String, dynamic>()),
         ],
       );
+    } else if (j['type'] == 'daily_character') {
+      setState(() => _dailyCharacter = DailyCharacter.fromJson(j));
     } else if (j['type'] == 'claude_activity_comment') {
       final text = (j['text'] as String?) ?? '';
       if (text.isNotEmpty) {
@@ -1109,6 +1113,7 @@ class _TrackpadScreenState extends State<TrackpadScreen>
           todos: _lastTodos,
           knowledge: _lastKnowledge,
           latestComment: _lastActivityComment,
+          character: _dailyCharacter,
           connKind: widget.connKind,
           onMove: _move,
           onScroll: _onScrollDelta,
