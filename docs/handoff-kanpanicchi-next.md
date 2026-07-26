@@ -1,165 +1,176 @@
 # 引き継ぎ: かんぱにっち 次回作業メモ
 
-> 2026-07-25 のセッション終了時点の引き継ぎ。前回（2026-07-24分）の内容は本ドキュメント末尾
-> 「前回までにやったこと（〜2026-07-24）」に圧縮して残す。今回の変更点は
-> 「今回やったこと（2026-07-25）」を参照。コミットは `9d11737`（資料室ナレッジ機能・
-> リモート化Part A・エラーログ追加）まで。それ以降のUI修正（キャラのサイズ調整、部屋間隔、
-> レベルアップ描画バグ修正、name/exp表示の入れ替え等）は**未コミット**（`git status`で
-> `app/lib/kanpanicchi.dart` / `app/lib/settings.dart` / `pc/scripts/claude-notify.ps1` が
-> 変更中のはず）。
+> 2026-07-26 のセッション終了時点。この日は `f3fb39e`〜`82ec095` の6コミット。
+> **すべてコミット・プッシュ済み**（ブランチ `haiku-commentary`、リモート `origin`）。
+> それ以前の経緯は末尾「これまでの経緯（〜2026-07-25）」に圧縮して残す。
 
-## 今回の大きな方針転換: Codex実装がデフォルトに
+## 開発体制: 指示=クロコ / 実装=チャトピ / レビュー=クロコ
 
-2026-07-25、`--dangerously-bypass-approvals-and-sandbox` でCodex CLIがWindows環境でも
-実際にファイルを書けることを確認した（会議室まわりの部屋レイアウト修正、レベルアップ
-描画バグ修正の2件で実証）。**ユーザーの意向により、このリポジトリでは「Codexが実装
-（bypassで）→クロがレビュー」が標準の進め方になった。** 詳細手順は
-`~/.claude/skills/codex-build-review/SKILL.md` の「既知の環境事情（Windows）」を参照。
-要点: フォアグラウンド実行必須（バックグラウンドだとハーネス側の事情でkilledになることが
-あった）、bypass前にgitクリーンな状態を確認、実装後は必ず`git diff`と`flutter analyze`を
-クロ自身で確認する。
+`codex exec --dangerously-bypass-approvals-and-sandbox` でCodex CLIがWindowsでも
+ファイルを書けることを実証済み。**このリポジトリでは「Codexが実装 → クロがレビュー」が標準**。
+難しい設計判断・原因調査は、実装前にチャトピへ相談する（read-onlyの `-c approval_policy="never"` でよい）。
+率直な批判を求めると質の高い指摘が返る（「良くできています は不要」と書く）。
 
-## 次回やること（優先順、現在のタスクリストと対応）
+**フォアグラウンド実行必須**（バックグラウンドだと理由不明でkilledになる）。
+実装後は必ず `git diff` を自分で読み、`flutter analyze` / `dotnet build` も自分で流し直す。
 
-### 1. レベルアップの演出・作り込み（#11、未着手）
-ユーザー要望「レベルが上がったらどうなるとか、作り込みたい！みんながいつまでも遊べる
-ゲームにしたい！」
-- 現状: Lv5/10/20 でスプライトに ネクタイ/バッジ/王冠 が付く（`_tieredSprite`）＋
-  LEVEL UP! バナー（`_LevelUpBanner`、今回`RepaintBoundary`でラップ済み）。
-- 案: レベル帯ごとのアンロック要素（新しい部屋・家具・アニメーション）、レベルアップ時の
-  紙吹雪などの演出強化、役職ごとの給料日イベント等。
+### 完了条件は「ビルドが通る」ではない（この日の最大の教訓）
 
-### 2. 下半分タブの初期表示バグ（#14、未着手・要調査）
-`_bottomTab = 0`（TODO）が初期値のはずが、アプリ再起動直後に実況側が表示されていた
-ことが1回あった。再現条件未特定。今回、TODO/実況の切り替えをボタンからスワイプ
-（`PageView` + `_bottomPageController`）に変更したため、再現条件が変わっている
-可能性がある。次に見る時は新しいスワイプ実装を前提に調査すること。
+外部プロセス・外部APIを呼ぶコードは、**ビルド成功が動作の保証にならない**。
+この日、ビルドが通ったコードが実機で5回連続して失敗した。完了条件には
+**実際に呼んで成功応答を得た証拠**を要求すること。
 
-### 3. 実況ログの永続化（#15、未着手）
-実況ログ（`_commentLog`、最大30件）はアプリ内メモリのみで再起動すると消える。
-TODOやナレッジと同じ「PC側で覚えて`_get`で復元」パターンが流用できる
-（`_lastTodos`／`KnowledgeStore`と同型）。
+| リスク | 要求すべき証拠 |
+|---|---|
+| 文字コードが化ける | 受信側で観測した実バイト列 |
+| 引数・パスが壊れる | 受信側で観測した引数 |
+| スキーマが拒否される | 実エンドポイントの成功応答 |
+| 原因がログから消える | 長い異常応答での保存結果 |
 
-### 4. TODOパネルのフェーズ折り畳み・優先度表示（#23、対応済み 2026-07-25）
-**subjectの先頭にプレフィックスを書く運用**で実現した。PC側のスキーマ変更は不要。
+知見は `~/.claude/skills/llm-structured-generation/SKILL.md` に集約してある。
+
+---
+
+## 次回やること（優先順）
+
+### P2
+- **#34 ナレッジをプロジェクト単位に分割する** — 現在 `knowledge.json` は単一ファイルで
+  上限500件も全プロジェクト共通。他プロジェクトの作業で古い日誌が押し出される。
+  Gitルートを解決して projectId と displayName を分ける。既存データは移行せずlegacy扱い
+  （同名ディレクトリの誤配属を避けるため）。
+- **#30 資料室をdocs置き場・アイデア置き場・日報置き場にする**
+- **#44 部屋カードの中身を描き込む** — 現在はIconと部屋名だけ。
+  `docs/mockups/daily_character_concept.png` にチャトピが描いた完成イメージがある。
+
+### P3
+- **#31 ナレッジの全文検索**
+- **#24 会議室(委任中ゾーン)の要否** — `Task`ツール使用時のみ点灯するため、
+  直接実装が多い今のスタイルではほぼ使われない。別の部屋への置き換えを検討。
+- **#36 日誌に通知文が混ざらないか確認** — 修正済みだが実機での最終確認が未了。
+
+### 保留
+- **リモート化 Part A-1（インフラ構築）** — アプリ・PC側のコードは実装済み。
+  cloudflared のインストールとCloudflare Access（Service Token方式）の設定が未実施。
+
+---
+
+## この日やったこと（2026-07-26）
+
+### 日替わりキャラクター機能（レベル制を完全廃止）
+コンセプト: **「かんぱには毎朝、昨日の働き方を身につけて出社する」**
+
+- 昨日の資料室ナレッジから、Codex CLIがその日のパーツ集・配色・背景・性格を生成し、
+  そこから今日のキャラを組み立てる。パーツ集自体を毎日作り直すため組み合わせは実質無限
+- レベル/XP/役職/レベルアップ演出を完全廃止。ヘッダーの跡地に今日のテーマと
+  「なぜこの姿なのか」の理由を表示
+- スプライトのパレット・背景色・床ドット色を日替わりに
+- Haikuプロンプトを4層構成（固定の土台 → 日替わり性格 → タスク別指示 → 安全ルール）にし、
+  生成された性格を注入しつつ安全ルールは上書き不能に
+- 実装: `DailyCharacterStore.cs` / `DailyCharacterService.cs`（新規）
+
+**成功までに越えた壁（すべて実機でのみ発覚）:**
+1. stdinがCP932でCodexが起動不可 → `StandardInputEncoding` をUTF-8固定
+2. `cmd.exe /c` のクォート処理でパス破損（os error 123）→ **`node.exe` に `codex.js` を
+   直接渡して `cmd.exe` を排除**（npm製CLIは`.cmd`シムなので`Process.Start`から直接起動できない）
+3. `minProperties` がOpenAI構造化出力に拒否される → 削除
+4. 任意キーのマップが拒否される → **固定キー `c1`〜`c6`** にして構造的に不可能に
+5. **トレイ起動中にビルドしてexeが更新されていなかった** → 必ず停止確認→ビルド→起動の順
+
+### TODO同期を正しいフックイベントで作り直す
+**TODO同期は今まで一度も正しく動いていなかった。**
+
+- 旧実装は `PreToolUse` で `TaskCreate`/`TaskUpdate` を拾おうとしていたが、
+  **タスクツールは PreToolUse の対象外**（公式ドキュメント確認済み。対象は Bash/Write/Edit/
+  Read/Glob/Grep/WebFetch/WebSearch/Agent/AskUserQuestion/ExitPlanMode のみ）
+- 正しくは専用イベント **`TaskCreated` / `TaskCompleted`**。`~/.claude/settings.json` に設定済み
+- ペイロードには **Claude側の本物の `task_id`** が入るため、PC側の独自採番を廃止できた
+- `task_state.json` をセッション別のv2形式に変更。旧形式は移行せず破棄
+- 受信は `POST /api/claude-task`。デバッグ用に `task_hook_dump.log` へ生JSONも記録
+
+**実測したペイロード:**
+```json
+{"session_id":"...","cwd":"...","hook_event_name":"TaskCreated",
+ "task_id":"46","task_subject":"...","task_description":"..."}
+```
+
+**制約**: `in_progress` に対応するイベントが存在しないため、PC側は pending/completed の
+2状態のみ。アプリ側で「未完了の先頭1件を実行中とみなす」表示にしている
+（`status` は書き換えず表示ロジックのみ。将来イベントが提供されたら戻せる形）。
+
+### 実況の運用品質を改善
+実況が全く動いていなかったが、**原因が一切ログに残っていなかった**。
+
+- `CallHaikuAsync` が `if (!resp.IsSuccessStatusCode) return null;` で
+  **ステータスも本文も捨てていた** → 「ログが空だから正常」と誤認していた
+- **`HaikuSettingsStore` のBOMバグ** — 設定ファイルがBOM付きだと
+  `JsonDocument.Parse(string)` が失敗し、catchで握り潰されて**保存済みAPIキーが黙って消える**。
+  `File.ReadAllBytes` に変更（Load/Save両方）
+- 401/402/403 は即座に自動休止し、無駄なリトライと課金を防ぐ（休止状態は永続化）。
+  429/5xx はバックオフで再試行
+- 休止理由を `haiku_status` メッセージでアプリへ送り、実況欄に日本語で表示
+- 実況ログをPC側に直近100件キャッシュ（`CommentaryStore.cs`）。資料室の日誌とは別ファイル
+- **日替わり性格がキャラのアイデンティティごと置き換えていた**問題も修正。
+  「あなたは『かんぱに』」「一人称と語尾を一貫して使う」は日替わりと無関係に常に与える
+
+### UI
+- TODOパネルを実用的に再設計: 全フェーズ横断の「次にやる」上位3件を固定表示、
+  フェーズ別進捗、完了は最下部の折り畳みセクション
+- ヘッダーのテーマ・理由は1行省略のため、**キャラアイコンのタップでも全文が読める**ように
+- 「(不明なタスク)」のノイズを除去
+
+---
+
+## TaskCreate の記法（この運用は必ず守る）
+
+subjectの先頭にプレフィックスを書くと、アプリがフェーズ別にグループ化し優先度を表示する。
 
 ```
 [phase:資料室/P1] ナレッジから実況履歴を外す   ← フェーズ＋優先度
 [フェーズ:資料室/P2] タイトル                   ← 日本語表記も可
 [phase:資料室] タイトル                         ← フェーズのみ（優先度なし＝中位）
 [P1] タイトル                                   ← 優先度のみ（未分類グループ）
-タイトル                                        ← 従来どおり（未分類・優先度なし）
+タイトル                                        ← 従来どおり
 ```
 
-- フェーズごとにグループ化され、見出しタップで折り畳める（完了件数も見出しに表示）。
-- 優先度は P1（🔴最優先）/ P2（🟡）/ P3（⚪いつか）。**優先度なしはマーク無しでP2と同列**
-  （既存タスクが下に沈まないための設計）。
-- グループ内の並び順: 実行中 → P1 → P2・指定なし → P3 → 完了。
-- プレフィックスは表示時にタスク名から除去される。
-- 実装: `app/lib/kanpanicchi.dart` の `_TodoPanelState`（`_phasePrefix` の正規表現）。
+- P1（🔴最優先）/ P2（🟡）/ P3（⚪いつか）。**優先度なしはマーク無しでP2と同列**
+- グループ内の並び順: 実行中 → P1 → P2・指定なし → P3 → 完了
+- プレフィックスは表示時に除去される
+- 実装: `app/lib/kanpanicchi.dart` の `_TodoPanelState`（`_phasePrefix` の正規表現）
 
-### 5. 会議室(委任中ゾーン)の要否検討（#24、未着手）
-会議室は`Task`ツール（サブエージェント委任）使用時のみ点灯する作りだが、直接実装
-中心のワークスタイルだとほとんど使われない。チャトピにも意見を聞きながら、別の
-部屋に置き換えるか検討する。
-
-### 6. リモート化 Part A-1（インフラ構築、ユーザー側作業・未着手）
-アプリ・PC側のコードは実装済み（後述）。cloudflared のインストール・トンネル作成・
-Cloudflare Access アプリケーション設定（Service Token方式）はユーザー側の作業として
-未実施。手順は本ドキュメントの旧版（このコミット履歴で遡れる）または
-`docs/spec-remote-kanpanicchi.md` のPhase1相当を参照しつつ、実際にはPart Aの設計
-（本ドキュメント末尾）に従うこと。
+---
 
 ## 既知の注意点
-- **PocketPadTrayは管理者権限常駐**。再ビルド反映には UAC 承認つきの停止→起動が必要。
-  ビルド出力は `bin/Release/net8.0-windows/PocketPadTray.exe`（Windows起動時自動起動の
-  登録先もこちら）。
-- **実機テストはWi-Fi adb接続**（型番 "A25"、MediaTek系。旧メモの「xs17pro」と同一機体の
-  可能性が高いが未確認）。ワイヤレスデバッグは接続が頻繁に切れる（`adb devices`で
-  `offline`/`error: closed`になったら`adb connect <ip>:<port>`で再接続、それでもダメなら
-  `adb kill-server && adb start-server`）。
-- **`flutter build apk --debug`はバックグラウンド実行だと理由不明で`killed`になることが
-  複数回あった。フォアグラウンド実行（`run_in_background`なし）の方が確実。**
-- shared_preferencesを直接書き換えてテストする場合、`adb shell run-as <package> cp ...`は
-  MSYS/Git Bashのパス変換で`/data/...`が壊れるため`MSYS_NO_PATHCONV=1`を必ず付ける。
-- adbでの日本語混じりテキスト入力（`input text`）はGboardの予測変換でアルファベット単体が
-  かな変換されて文字化けすることがある（例: `0245a432`の`a`が`あ`になる）。確実に入れたい
-  時は`input keyevent`で1文字ずつ叩くか、SharedPreferences/設定ファイルを直接書き換える方が速い。
-- 一部端末（MediaTek系GPU）の描画崩れ対策として **Impeller無効化**（AndroidManifest）＋
-  `RepaintBoundary`を要所に入れてある（トラックパッドパネル、レベルアップバナー）。
-  今後似た「前のフレームが残る」系のゴーストバグが出たら同じパターンで対処する。
-- Haiku実況のAPIキーは`%APPDATA%\PocketPad\haiku_settings.json`（DPAPI暗号化）。
-  User環境変数運用は誤課金インシデントを受けて廃止済み。
-- **PowerShellのstdin読み取りエンコーディングに注意**（`claude-notify.ps1`で今回発覚）。
-  `[Console]::In.ReadToEnd()`は既定でシステムのレガシーコードページを使うため、
-  Claude CodeがUTF-8で渡す日本語（最終応答文など）を稀に誤読して文字化けさせる。
-  修正済み（`[Console]::InputEncoding = [System.Text.Encoding]::UTF8`を先頭に追加）。
-  同様にstdin/stdoutを扱うPowerShellスクリプトを新設する時は同じ対処を最初から入れること。
 
-## 今回やったこと（2026-07-25）
+- **PocketPadTrayは管理者権限常駐**。反映には UAC 承認つきの停止→ビルド→起動が必要。
+  **起動したままビルドするとexeが更新されない**（この日、失敗の一因になった）。
+  ビルド出力は `bin/Release/net8.0-windows/`（Windows起動時の自動起動もこちら）
+- **実機は Galaxy A25 5G（Wi-Fi adb）**。ワイヤレスデバッグはポートが毎回変わる。
+  `adb mdns services` で探すか、mDNS名（`adb-XXXX._adb-tls-connect._tcp`）で直接接続できる。
+  初回はペアリングコードが必要（コードは数分で失効するので、取得したら即実行すること）
+- **デバッグAPKは約184MB**。端末の空きが少ないとインストールに失敗する
+  （`Requested internal only, but not enough space`）
+- **`flutter build apk` はバックグラウンド実行だと理由不明でkilledになる**。フォアグラウンド推奨
+- `adb shell run-as` で `/data/...` を扱う時は `MSYS_NO_PATHCONV=1` が必要
+- adbの `input text` はGboardの予測変換で英数字がかな変換されることがある。
+  確実に入れたいときは `input keyevent` か、SharedPreferencesを直接書き換える
+- 一部端末（MediaTek系GPU）の描画崩れ対策として **Impeller無効化**＋`RepaintBoundary`。
+  「前のフレームが残る」系のバグが出たら同じパターンで対処
+- **PowerShellのstdin読み取りは `[Console]::InputEncoding` をUTF-8に明示**しないと
+  日本語が化ける（`claude-notify.ps1` で対応済み）
+- フロアのキャラは **`pixelSize: 3.5` を維持**すること。6.0にすると部屋カードの
+  タップ判定に食い込む実機バグが再発する
 
-### 資料室ナレッジ機能（軽量版、コミット済み）
-- PC: `KnowledgeStore.cs`新設。ターン完了（stop）ごとに実際の最終応答をそのまま
-  `%APPDATA%\PocketPad\knowledge.json`へ1件追記（新しいAI要約は行わない）。
-  `toolsUsed`/`touchedFiles`（Edit/Write/NotebookEditのdetailから収集）/`commitHash`
-  （git commit検出時best-effort）も同梱。
-- PC: `claude_knowledge_get`（pull）/`claude_knowledge`（push、常に全件）をWsServerに追加。
-- アプリ: `KnowledgeEntry`モデル、資料室の「ナレッジを見る」ボタン→プロジェクト×日付で
-  グループ化した日誌一覧ページ（`_KnowledgeShelfPage`）。
+---
 
-### リモート化 Part A（アプリ側コードのみ、コミット済み。インフラ未構築）
-- `IOWebSocketChannel.connect(uri, headers:)`でCloudflare Access用ヘッダー
-  （`CF-Access-Client-Id`/`Secret`）付き接続に対応。
-- 自宅LAN/外出先の接続プロファイル切替UI、`profile_lan_host`/`profile_remote_host`の
-  prefsキー分離（旧`host`キーからの移行あり）。
-- 接続種別バッジ（🟢LAN/🟡リモート、`ConnKind`enum）をオフィス画面隅に表示。
+## これまでの経緯（〜2026-07-25、圧縮）
 
-### タスク状態の永続化（コミット済み）
-- `TaskStateStore.cs`新設。PC側トレイが複製しているTaskCreate/TaskUpdate状態を
-  `%APPDATA%\PocketPad\task_state.json`へ永続化。トレイ再起動をまたいでTODO一覧を保つ
-  （ただしトレイが一度も観測していないtaskIdはそもそも復元不能で「(不明なタスク)」表示になる、
-  これは仕様上の制約）。
-
-### エラーログ（コミット済み）
-- PC: `ErrorLog.cs`新設。「おまけ機能なので失敗を握りつぶす」系のcatch節（Haiku実況・
-  資料室記録）にログ出力を追加。`%APPDATA%\PocketPad\error.log`、トレイメニュー
-  「エラーログを開く」から確認可能。`Program.cs`にAppDomain/ThreadExceptionの
-  グローバルハンドラも追加。
-- アプリ: `FlutterError.onError`/`PlatformDispatcher.instance.onError`でSharedPreferences
-  （`error_log`キー、最大50件）に記録。新規パッケージは追加していない。
-
-### UI修正（一部未コミット、実機確認済み）
-- 名前が長い役職と同居して見切れる問題 → 一度バーの下に退避 → ユーザーフィードバックで
-  「レベルは名前の横のままでよい、経験値の数字をバーの下に」に再修正（現在の形）。
-- TODOパネル: 状態別ソート（実行中→未着手→完了）＋進捗バー・件数表示。
-- TODO/実況ログの切替をボタンから横スワイプ（`PageView`）に変更。
-- 会議室でキャラがタップを吸ってしまう問題 → キャラに`IgnorePointer`。
-- **部屋カードとキャラクターの重なりバグ（実機で複数回発覚・修正）**: 真因はキャラの
-  ドット絵サイズ（等倍だと約42px幅）が部屋カード間の隙間（実測約43px）とほぼ同じで、
-  Alignmentの位置調整だけでは原理的に避けられなかったこと。`_PixelSprite`に
-  `pixelSize`パラメータを追加してオフィス床では`3.5`（等倍は`6.0`のまま）に縮小、
-  かつ部屋カード自体の`align.y`を`±0.6→±0.8`に広げて行間を確保（後者はCodex実装）。
-  実機でピクセル計測して重なりが無いことを確認済み。
-- レベルアップバナーの描画ゴースト対策として`_LevelUpBanner`を`RepaintBoundary`で
-  ラップ（Codex実装、トラックパッドパネルと同じ対策パターン）。
-- Haiku実況の直近履歴保持数を5→20に拡張。
-- デフォルトの初期表示ページを「かんぱにっち(office)」に変更（`kPageNames`の並び順、
-  および実機の`settings.json`を直接書き換えて反映済み）。
-
-### 開発ツール
-- `~/.claude/skills/codex-imagegen/SKILL.md`新設。Codex CLI（`$imagegen`スキル/
-  GPT Image 2）を使ったUIモックアップ生成の手順（生成物のコピーがCodex自身の
-  サンドボックスで拒否されるため、Claude側でコピーする回避策込み）。
-  `docs/mockups/`にサンプル画像あり。
-
-## 前回までにやったこと（〜2026-07-24、圧縮）
-- 音声入力: 認識エラー時に結果が消えるバグ修正
-- LP作成・公開: https://yousayrock.github.io/013-pocketpad/
-- 「AI社員」→「かんぱにっち」全面改修（XP/レベル/役職、スプライト進化、部屋カード、
-  レベルアップバナー、名前カスタム、部屋タップ詳細、サーバー室からのファイル転送）
-- Haiku実況の導入（開始/途中経過/終了の3種、実際の最終応答ベースに再設計）
-- TODO同期のスマホ主導pull化
-- 描画崩れ（ゴースト）対策の初期版（Impeller無効化 + RepaintBoundary）
-- 切断時クラッシュ修正（popUntil）
-- トレイの多重起動防止（名前付きMutex、bind失敗のエラーダイアログ化）
-- Haiku実況APIキーをUser環境変数からDPAPI暗号化ローカル設定へ移行（誤課金インシデント対応）
+- 音声入力の修正、LP公開（https://yousayrock.github.io/013-pocketpad/）
+- 「AI社員」→「かんぱにっち」全面改修（オフィス移動、部屋カード、名前カスタム、
+  サーバー室からのファイル転送）
+- Haiku実況の導入（開始/途中経過/終了の3種、実際の最終応答ベース）
+- 資料室ナレッジ機能（ターン完了ごとに最終応答をそのまま日誌として保存する軽量方式）
+- リモート化 Part A（`IOWebSocketChannel` でのヘッダー付き接続、LAN/外出先プロファイル、
+  Cloudflare Access用のService Token入力、接続種別バッジ）
+- PC/アプリ両側にエラーログ機構を追加
+- トレイの多重起動防止、Haiku APIキーをDPAPI暗号化ローカル設定へ移行（誤課金インシデント対応）
+- 切断時クラッシュ・レベルアップ二重表示・部屋レイアウトなどの修正
