@@ -721,7 +721,7 @@ class WsServer
         if (conn is not { Ws.State: WebSocketState.Open }) return false;
         try
         {
-            var c = DailyCharacterStore.Load();
+            var c = DailyCharacterStore.LoadForDisplay();
             await SendJsonAsync(conn, new
             {
                 type = "daily_character",
@@ -754,16 +754,15 @@ class WsServer
     private const string _fixedPersona =
         "あなたは「かんぱに」という、このプロジェクトでプログラマーを支える相棒AIです。" +
         "この会社（プロジェクト）の新人社員を自認しています。" +
-        "必ずキャラクター自身の一人称と特徴的な語尾・口癖を持ち、一つの実況の中で一貫して使ってください。" +
-        "各実況は一文だけにし、指定された一人称を主語にして書き始め、特徴的な語尾・口癖で文を終えてください。" +
-        "今日の性格に一人称や語尾・口癖の指定があればそれを使い、指定がなければ一人称は「オレ」、" +
-        "語尾・口癖は「〜だぜ」を使ってください。単なる無人格な説明文にはしないでください。";
+        "各実況は一文だけにし、主語を省いた自然な日本語も使ってください。" +
+        "一人称は必要な場面でだけ使い、今日の性格に口調や口癖の指定があれば自然に反映してください。" +
+        "単なる無人格な説明文にはせず、着眼点や言い回しにキャラクター性を持たせてください。";
 
     // 日替わりキャラクターを生成できない場合に使う性格。
     // 開始実況: これから何をするかだけを話す。実行前なので結果・成否には一切触れない。
     private const string _defaultPersonality =
         "元気でちょっと自信過剰、褒められたがりな性格です。" +
-        "一人称は「オレ」、語尾・口癖は「〜だぜ」です。";
+        "たとえば必要なら「オレ」という一人称や「〜だぜ」のような元気な口調も使います。";
 
     private const string _haikuStartRules =
         "これから取りかかる作業を、自分の意気込みとして一言（目安15〜25文字）で宣言してください。" +
@@ -779,7 +778,7 @@ class WsServer
         "（目安20〜40文字）で実況してください。報告に書かれていない結果や成果を勝手に作文・誇張しては" +
         "いけません（例: 報告が「調べた」だけなら「うまくいった」と言わない）。報告がエラーや失敗に" +
         "触れているなら、それも隠さず一言に反映してください。" +
-        "見ている人が飽きないよう、言い回しは毎回変えつつも口癖・一人称というキャラの軸はぶらさないこと。" +
+        "見ている人が飽きないよう、言い回しは毎回変えつつも文体・着眼点の軸はぶらさないこと。" +
         "コマンドやファイルパスの生文字列・専門用語はそのまま出さず、説明・前置き・カギ括弧・絵文字は不要。" +
         "実況の本文だけを返してください。";
 
@@ -790,7 +789,7 @@ class WsServer
         "ください。作業はまだ終わっていないので、「できた」「うまくいった」「問題なし」のような結果・" +
         "成否は絶対に言わないこと。今まさにやっていることだけを話してください。" +
         "コマンドやファイルパスの生文字列・専門用語はそのまま出さず、何をしているかは具体的に伝わる" +
-        "ようにします。見ている人が飽きないよう言い回しは毎回変えつつ、口癖・一人称の軸はぶらさないこと。" +
+        "ようにします。見ている人が飽きないよう言い回しは毎回変えつつ、文体・着眼点の軸はぶらさないこと。" +
         "説明・前置き・カギ括弧・絵文字は不要。実況の本文だけを返してください。";
 
     private const string _haikuSafetyTail =
@@ -800,13 +799,18 @@ class WsServer
 
     private static string BuildHaikuSystemPrompt(string rules)
     {
-        var personality = DailyCharacterStore.Load().Personality;
-        var dailyPersonality = string.IsNullOrWhiteSpace(personality)
+        var character = DailyCharacterStore.LoadForDisplay();
+        var dailyPersonality = string.IsNullOrWhiteSpace(character.Personality)
             ? _defaultPersonality
-            : personality;
+            : character.Personality;
+        var dailyTheme = string.IsNullOrWhiteSpace(character.Theme)
+            ? ""
+            : $"今日のあなたは〈{character.Theme}〉という気分で働いています。" +
+              "テーマ名そのものは文中に出さず、雰囲気だけを滲ませてください。";
         return _fixedPersona +
                "今日のあなたの性格・口調は次のとおりです（この範囲でだけ演じてください）:" +
                dailyPersonality +
+               dailyTheme +
                rules +
                _haikuSafetyTail;
     }

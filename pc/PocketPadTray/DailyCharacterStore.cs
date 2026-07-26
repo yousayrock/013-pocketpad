@@ -7,7 +7,7 @@ sealed class DailyCharacter
     public int V { get; set; } = 1;
     public string Date { get; set; } = "";
     public string GeneratedAt { get; set; } = "";
-    public string Status { get; set; } = "default";
+    public string Status { get; set; } = "failed";
     public int Attempts { get; set; }
     public string? LastAttemptAt { get; set; }
     public string? LastError { get; set; }
@@ -63,6 +63,7 @@ static class DailyCharacterStore
     static readonly string FilePath = Path.Combine(Dir, "daily_character.json");
     static readonly object Gate = new();
     static DailyCharacter? _cache;
+    static DailyCharacter? _displayOverride;
 
     static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -104,6 +105,26 @@ static class DailyCharacterStore
         }
     }
 
+    /// <summary>生成中だけ直前の完成キャラを表示する。生成状態のレコードとは混ぜない。</summary>
+    public static DailyCharacter LoadForDisplay()
+    {
+        lock (Gate)
+        {
+            return _displayOverride is null ? Load() : Clone(_displayOverride);
+        }
+    }
+
+    /// <summary>今日の生成状態を保存しても、画面が空にならないよう直前の完成キャラを一時保持する。</summary>
+    public static void SetDisplayOverride(DailyCharacter? value)
+    {
+        lock (Gate)
+        {
+            _displayOverride = value is not null && value.Status is "ready" or "holiday"
+                ? Clone(value)
+                : null;
+        }
+    }
+
     public static void Save(DailyCharacter value)
     {
         lock (Gate)
@@ -128,7 +149,7 @@ static class DailyCharacterStore
     {
         Date = date,
         GeneratedAt = DateTimeOffset.Now.ToString("O"),
-        Status = "default",
+        Status = "failed",
         Palette = new Dictionary<string, string>
         {
             ["0"] = "#000000",

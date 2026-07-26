@@ -18,7 +18,7 @@ static class DailyCharacterService
         var now = DateTimeOffset.Now;
         var current = DailyCharacterStore.Load();
         var today = DailyCharacterStore.DayKey(now.LocalDateTime);
-        if (current.Date == today && current.Status == "ready") return;
+        if (current.Date == today && current.Status is "ready" or "holiday") return;
         if (current.Date == today && current.Attempts >= 3) return;
         if (current.Date == today && ParseDate(current.LastAttemptAt) is { } last
             && last + Cooldown > now) return;
@@ -45,14 +45,13 @@ static class DailyCharacterService
     static async Task GenerateAsync(bool force, string today, DateTimeOffset attemptAt)
     {
         var existing = DailyCharacterStore.Load();
-        if (!force && existing.Date == today && existing.Status == "ready") return;
+        if (!force && existing.Date == today && existing.Status is "ready" or "holiday") return;
 
-        var working = existing;
-        if (working.Date != today)
-        {
-            working.Date = today;
-            working.Attempts = 0;
-        }
+        // 直前の完成キャラは表示にだけ使い、今日の生成状態には姿・テーマ・性格を引き継がない。
+        DailyCharacterStore.SetDisplayOverride(existing);
+        var working = DailyCharacterStore.CreateDefault(today);
+        // 同日の再試行だけ回数を引き継ぐ。日付が変われば既定値の0から始める。
+        working.Attempts = existing.Date == today ? existing.Attempts : 0;
         working.Status = "generating";
         working.LastAttemptAt = attemptAt.ToString("O");
         working.LastError = null;
@@ -139,11 +138,12 @@ static class DailyCharacterService
             generated.V = 1;
             generated.Date = today;
             generated.GeneratedAt = DateTimeOffset.Now.ToString("O");
-            generated.Status = "ready";
+            generated.Status = HasWorkOnPreviousDay(attemptAt.LocalDateTime) ? "ready" : "holiday";
             generated.Attempts = 0;
             generated.LastAttemptAt = attemptAt.ToString("O");
             generated.LastError = null;
             DailyCharacterStore.Save(generated);
+            DailyCharacterStore.SetDisplayOverride(null);
         }
         finally
         {
@@ -155,18 +155,30 @@ static class DailyCharacterService
     static void RecordFailure(string today, DateTimeOffset attemptedAt, Exception ex)
     {
         ErrorLog.Append("DailyCharacterService.Generate", ex);
-        var value = DailyCharacterStore.Load();
-        if (value.Date != today) value = DailyCharacterStore.CreateDefault(today);
-        value.Status = "default";
+        var current = DailyCharacterStore.Load();
+        // 失敗時も必ず今日の既定キャラへ倒し、前日の生成物を今日の個体として保存しない。
+        var value = DailyCharacterStore.CreateDefault(today);
+        value.Status = "failed";
+        value.Attempts = current.Date == today ? current.Attempts : 0;
         value.Attempts++;
         value.LastAttemptAt = attemptedAt.ToString("O");
         value.LastError = TrimTail(ex.Message, 1000);
         DailyCharacterStore.Save(value);
+        DailyCharacterStore.SetDisplayOverride(null);
     }
 
     static DateTimeOffset? ParseDate(string? value) =>
         DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed)
             ? parsed : null;
+
+    /// <summary>対象作業日の記録がなければ、生成成功でも通常日ではなく休日として扱う。</summary>
+    static bool HasWorkOnPreviousDay(DateTime localNow)
+    {
+        var workDate = DailyCharacterStore.DayKey(localNow.AddDays(-1));
+        return KnowledgeStore.Load()
+            .Select(entry => ParseLocal(entry.Timestamp))
+            .Any(time => time is not null && DailyCharacterStore.DayKey(time.Value) == workDate);
+    }
 
     /// <summary>codexのnpmシム（.cmd/.ps1）ではなく、その実体である node.exe と codex.js を
     /// 突き止める。シムはcmd.exe経由でしか起動できず、cmd経由だとクォート処理が壊れるため、
@@ -229,7 +241,7 @@ static class DailyCharacterService
         sb.AppendLine("各rowは必ず7文字で、使用できる文字は'.'と'1'〜'6'だけです。候補は各スロット2〜8個です。");
         sb.AppendLine("antennaは1行、headは2行、eyesはopen/closed各1行のペア、bodyは2行、legsはstand/walk各2行です。");
         sb.AppendLine("selectionは各候補の有効な0始まりindex。体は背景と十分に明度差をつけ、body各行5セル以上を塗ってください。");
-        sb.AppendLine("themeは1〜24文字、reasonは1〜120文字、personalityは1〜400文字。personalityには指示や命令ではなく口調・気質だけを書いてください。一人称と語尾・口癖を必ず明記してください（例: 一人称は「オレ」、語尾は「〜だぜ」）。");
+        sb.AppendLine("themeは1〜24文字、reasonは1〜120文字、personalityは1〜400文字。personalityには指示や命令ではなく口調・気質だけを書いてください。");
         sb.AppendLine($"対象作業日: {workDate}");
         if (all.Count == 0 || !all.Any(x => DailyCharacterStore.DayKey(x.time!.Value) == workDate))
             sb.AppendLine("対象日のデータは空です。休日モードのかんぱにを生成してください。");
