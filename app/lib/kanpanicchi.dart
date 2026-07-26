@@ -619,9 +619,12 @@ class _StatsHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // statusはPC側の DailyCharacter.Status と対応（generating/ready/failed/holiday）。
+    // 生成できていない状態でreasonをそのまま出すと空欄になるので、状態ごとの文言に倒す。
     final reason = switch (character.status) {
       'generating' => '今日のキャラを準備中…',
-      'default' => '今日のキャラはまだ作られていないよ',
+      'failed' => '今日のキャラはまだ作られていないよ',
+      'holiday' when character.reason.isEmpty => '昨日はおやすみだったよ',
       _ => character.reason,
     };
     return Padding(
@@ -701,241 +704,6 @@ class _StatsHeader extends StatelessWidget {
   }
 }
 
-/// 下半分の「TODOリスト」。Claude Code自身のTodoWriteの進捗をそのまま見せる
-/// （未着手/実行中/完了）。
-class _TodoPanel extends StatefulWidget {
-  const _TodoPanel({required this.todos, required this.color});
-  final List<TodoItem> todos;
-  final Color color;
-
-  @override
-  State<_TodoPanel> createState() => _TodoPanelState();
-}
-
-class _TodoPanelState extends State<_TodoPanel> {
-  static final _phasePrefix = RegExp(
-    r'^\[(?:(?:phase|フェーズ)\s*:\s*([^/\]]+?)(?:\s*/\s*(P\d+))?|(P\d+))\]\s*',
-    caseSensitive: false,
-  );
-  final Set<String> _collapsedPhases = {};
-
-  // 状態ごとの並び優先度: 実行中 → 未着手 → 完了。完了が下に沈むことで
-  // 「今やっていること／これからやること」が上に残り、スクロールせず一目で分かる。
-  static int _statusRank(String status) => switch (status) {
-    'in_progress' => 0,
-    'completed' => 2,
-    _ => 1,
-  };
-
-  static String? _priorityOf(TodoItem todo) {
-    final match = _phasePrefix.firstMatch(todo.content);
-    final priority = (match?.group(2) ?? match?.group(3))?.toUpperCase();
-    return switch (priority) {
-      'P1' || 'P2' || 'P3' => priority,
-      _ => null,
-    };
-  }
-
-  static int _priorityRank(TodoItem todo) => switch (_priorityOf(todo)) {
-    'P1' => 0,
-    'P3' => 2,
-    _ => 1,
-  };
-
-  static int _displayRank(TodoItem todo) {
-    if (todo.status == 'in_progress') return 0;
-    return _priorityRank(todo) + 1;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final todos = widget.todos;
-    final color = widget.color;
-    if (todos.isEmpty) {
-      return Center(
-        child: Text(
-          'Claude CodeがTODOを作ると\nここに一覧が表示されます',
-          textAlign: TextAlign.center,
-          style: const TextStyle(color: Colors.white24, fontSize: 12),
-        ),
-      );
-    }
-    final doneCount = todos.where((t) => t.status == 'completed').length;
-    final remaining = todos.where((t) => t.status != 'completed').toList()
-      ..sort((a, b) {
-        final rank = _displayRank(a).compareTo(_displayRank(b));
-        return rank != 0
-            ? rank
-            : todos.indexOf(a).compareTo(todos.indexOf(b));
-      });
-    final activeTodo = remaining.firstOrNull;
-    final grouped = <String, List<TodoItem>>{};
-    for (final todo in todos) {
-      final match = _phasePrefix.firstMatch(todo.content);
-      final phase = match?.group(1)?.trim();
-      grouped
-          .putIfAbsent(phase == null || phase.isEmpty ? '未分類' : phase, () => [])
-          .add(todo);
-    }
-    // フェーズの登場順は維持し、各フェーズ内で従来どおり状態別に安定ソートする。
-    for (final phaseTodos in grouped.values) {
-      phaseTodos.sort((a, b) {
-        final rank = _statusRank(a.status).compareTo(_statusRank(b.status));
-        if (rank != 0) return rank;
-        if (a.status != 'completed') {
-          final priorityRank = _priorityRank(a).compareTo(_priorityRank(b));
-          if (priorityRank != 0) return priorityRank;
-        }
-        return todos.indexOf(a).compareTo(todos.indexOf(b));
-      });
-    }
-
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(3),
-                  child: LinearProgressIndicator(
-                    value: doneCount / todos.length,
-                    minHeight: 4,
-                    backgroundColor: Colors.white12,
-                    valueColor: AlwaysStoppedAnimation<Color>(color),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '$doneCount/${todos.length}',
-                style: const TextStyle(color: Colors.white38, fontSize: 11),
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-            children: [
-              for (final entry in grouped.entries) ...[
-                InkWell(
-                  borderRadius: BorderRadius.circular(4),
-                  onTap: () => setState(() {
-                    if (!_collapsedPhases.add(entry.key)) {
-                      _collapsedPhases.remove(entry.key);
-                    }
-                  }),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Row(
-                      children: [
-                        Icon(
-                          _collapsedPhases.contains(entry.key)
-                              ? Icons.chevron_right
-                              : Icons.expand_more,
-                          color: Colors.white54,
-                          size: 19,
-                        ),
-                        const SizedBox(width: 3),
-                        Expanded(
-                          child: Text(
-                            entry.key,
-                            style: const TextStyle(
-                              color: Colors.white60,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ),
-                        Text(
-                          '${entry.value.where((t) => t.status == 'completed').length}'
-                          '/${entry.value.length}',
-                          style: const TextStyle(
-                            color: Colors.white30,
-                            fontSize: 10,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                if (!_collapsedPhases.contains(entry.key))
-                  for (final t in entry.value)
-                    _buildTodo(t, color, active: identical(t, activeTodo)),
-              ],
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildTodo(
-    TodoItem todo,
-    Color color, {
-    required bool active,
-  }) {
-    final done = todo.status == 'completed';
-    final icon = done
-        ? Icons.check_circle
-        : active
-        ? Icons.autorenew
-        : Icons.radio_button_unchecked;
-    final iconColor = done ? color : (active ? _kMagenta : Colors.white24);
-    final rawLabel =
-        active &&
-            todo.activeForm.isNotEmpty &&
-            todo.activeForm != todo.content
-        ? todo.activeForm
-        : todo.content;
-    final label = rawLabel.replaceFirst(_phasePrefix, '');
-    final priorityColor = switch (_priorityOf(todo)) {
-      'P1' => Colors.redAccent,
-      'P2' => Colors.amber,
-      'P3' => Colors.white38,
-      _ => null,
-    };
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 5, 0, 5),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (priorityColor != null) ...[
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Container(
-                width: 7,
-                height: 7,
-                decoration: BoxDecoration(
-                  color: priorityColor,
-                  shape: BoxShape.circle,
-                ),
-              ),
-            ),
-            const SizedBox(width: 6),
-          ],
-          Icon(icon, color: iconColor, size: 18),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              label,
-              style: TextStyle(
-                color: done ? Colors.white38 : Colors.white70,
-                fontSize: 13,
-                fontWeight: active ? FontWeight.w600 : FontWeight.normal,
-                decoration: done ? TextDecoration.lineThrough : null,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _TodoBoard extends StatefulWidget {
   const _TodoBoard({required this.todos, required this.color});
 
@@ -951,7 +719,8 @@ class _TodoBoardState extends State<_TodoBoard> {
     r'^\[(?:(?:phase|フェーズ)\s*:\s*([^/\]]+?)(?:\s*/\s*(P\d+))?|(P\d+))\]\s*',
     caseSensitive: false,
   );
-  final Set<String> _collapsed = {};
+  // 同期で未知のフェーズが増えても一覧が勝手に開かないよう、開いたものだけを保持する。
+  final Set<String> _expanded = {};
   bool _completedCollapsed = true;
 
   static String _phase(TodoItem task) {
@@ -966,9 +735,7 @@ class _TodoBoardState extends State<_TodoBoard> {
 
   static String _label(TodoItem task, {bool active = false}) {
     final source =
-        active &&
-            task.activeForm.isNotEmpty &&
-            task.activeForm != task.content
+        active && task.activeForm.isNotEmpty && task.activeForm != task.content
         ? task.activeForm
         : task.content;
     return source.replaceFirst(_prefix, '');
@@ -1007,26 +774,46 @@ class _TodoBoardState extends State<_TodoBoard> {
             : tasks.indexOf(a).compareTo(tasks.indexOf(b));
       });
     final activeTask = remaining.firstOrNull;
+    final featured = remaining.take(3).toList();
+    // 上段の「いま」「次」と同じ項目を下段へ再掲せず、540pxを有効に使う。
+    final featuredSet = featured.toSet();
     final grouped = <String, List<TodoItem>>{};
-    for (final task in tasks) {
-      grouped.putIfAbsent(_phase(task), () => []).add(task);
+    for (final task in remaining) {
+      if (!featuredSet.contains(task)) {
+        grouped.putIfAbsent(_phase(task), () => []).add(task);
+      }
     }
 
     return Column(
       children: [
+        // スクロール領域の外へ置き、全体進捗を常に一目で確認できるようにする。
         Padding(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 1),
-          child: Row(
+          padding: const EdgeInsets.fromLTRB(12, 7, 12, 5),
+          child: Column(
             children: [
-              Text(
-                '進捗 $done/${tasks.length}  残り${remaining.length}',
-                style: const TextStyle(color: Colors.white60, fontSize: 10),
+              Row(
+                children: [
+                  const Text(
+                    '進捗',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '$done/${tasks.length}  残り${remaining.length}件',
+                    style: const TextStyle(color: Colors.white60, fontSize: 10),
+                  ),
+                ],
               ),
-              const SizedBox(width: 8),
-              Expanded(
+              const SizedBox(height: 5),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
                 child: LinearProgressIndicator(
                   value: done / tasks.length,
-                  minHeight: 3,
+                  minHeight: 8,
                   backgroundColor: Colors.white12,
                   valueColor: AlwaysStoppedAnimation<Color>(widget.color),
                 ),
@@ -1039,10 +826,10 @@ class _TodoBoardState extends State<_TodoBoard> {
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text(
-              '次にやる',
+              'いま',
               style: TextStyle(
                 color: widget.color,
-                fontSize: 10,
+                fontSize: 11,
                 fontWeight: FontWeight.bold,
               ),
             ),
@@ -1056,13 +843,26 @@ class _TodoBoardState extends State<_TodoBoard> {
               style: TextStyle(color: Colors.white38, fontSize: 11),
             ),
           )
-        else
-          for (final task in remaining.take(3))
-            _taskRow(
-              task,
-              active: identical(task, activeTask),
-              phase: _phase(task),
+        else ...[
+          _taskRow(activeTask!, active: true, phase: _phase(activeTask)),
+          if (featured.length > 1)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 3, 12, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '次',
+                  style: TextStyle(
+                    color: widget.color,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
             ),
+          for (final task in featured.skip(1))
+            _taskRow(task, active: false, phase: _phase(task)),
+        ],
         const Divider(height: 4, thickness: 1, color: Colors.white10),
         Expanded(
           child: ListView(
@@ -1070,14 +870,14 @@ class _TodoBoardState extends State<_TodoBoard> {
             children: [
               for (final entry in grouped.entries) ...[
                 _phaseHeader(entry.key, entry.value, activeTask),
-                if (!_collapsed.contains(entry.key))
-                  for (final task in entry.value)
-                    if (task.status != 'completed')
-                      _taskRow(task, active: identical(task, activeTask)),
+                if (_expanded.contains(entry.key))
+                  for (final task in entry.value) _taskRow(task, active: false),
               ],
-              _completedHeader(completed.length),
-              if (!_completedCollapsed)
-                for (final task in completed) _completedTaskRow(task),
+              if (completed.isNotEmpty) ...[
+                _completedHeader(completed.length),
+                if (!_completedCollapsed)
+                  for (final task in completed) _completedTaskRow(task),
+              ],
             ],
           ),
         ),
@@ -1091,7 +891,7 @@ class _TodoBoardState extends State<_TodoBoard> {
         _completedCollapsed = !_completedCollapsed;
       }),
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
+        padding: const EdgeInsets.symmetric(vertical: 8),
         child: Row(
           children: [
             Icon(
@@ -1131,11 +931,7 @@ class _TodoBoardState extends State<_TodoBoard> {
               _label(task),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: Colors.white38,
-                fontSize: 11,
-                decoration: TextDecoration.lineThrough,
-              ),
+              style: const TextStyle(color: Colors.white38, fontSize: 12),
             ),
           ),
         ],
@@ -1148,7 +944,6 @@ class _TodoBoardState extends State<_TodoBoard> {
     List<TodoItem> tasks,
     TodoItem? activeTask,
   ) {
-    final done = tasks.where((task) => task.status == 'completed').length;
     final urgent = tasks.any(
       (task) =>
           task.status != 'completed' &&
@@ -1156,16 +951,16 @@ class _TodoBoardState extends State<_TodoBoard> {
     );
     return InkWell(
       onTap: () => setState(() {
-        if (!_collapsed.add(phase)) _collapsed.remove(phase);
+        if (!_expanded.add(phase)) _expanded.remove(phase);
       }),
       child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 3),
+        padding: const EdgeInsets.symmetric(vertical: 8),
         child: Row(
           children: [
             Icon(
-              _collapsed.contains(phase)
-                  ? Icons.chevron_right
-                  : Icons.expand_more,
+              _expanded.contains(phase)
+                  ? Icons.expand_more
+                  : Icons.chevron_right,
               color: urgent ? _kMagenta : Colors.white54,
               size: 16,
             ),
@@ -1181,21 +976,9 @@ class _TodoBoardState extends State<_TodoBoard> {
                 ),
               ),
             ),
-            SizedBox(
-              width: 42,
-              child: LinearProgressIndicator(
-                value: done / tasks.length,
-                minHeight: 2,
-                backgroundColor: Colors.white12,
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  urgent ? _kMagenta : widget.color,
-                ),
-              ),
-            ),
-            const SizedBox(width: 5),
             Text(
-              '$done/${tasks.length}',
-              style: const TextStyle(color: Colors.white38, fontSize: 9),
+              '残り${tasks.length}',
+              style: const TextStyle(color: Colors.white38, fontSize: 10),
             ),
           ],
         ),
@@ -1203,11 +986,7 @@ class _TodoBoardState extends State<_TodoBoard> {
     );
   }
 
-  Widget _taskRow(
-    TodoItem task, {
-    required bool active,
-    String? phase,
-  }) {
+  Widget _taskRow(TodoItem task, {required bool active, String? phase}) {
     final priority = _priority(task);
     final priorityColor = switch (priority) {
       'P1' => Colors.redAccent,
@@ -1234,7 +1013,7 @@ class _TodoBoardState extends State<_TodoBoard> {
               priority,
               style: TextStyle(
                 color: priorityColor,
-                fontSize: 8,
+                fontSize: 10,
                 fontWeight: FontWeight.bold,
               ),
             ),
@@ -1247,7 +1026,7 @@ class _TodoBoardState extends State<_TodoBoard> {
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: Colors.white70,
-                fontSize: 11,
+                fontSize: 12,
                 fontWeight: active ? FontWeight.w600 : FontWeight.normal,
               ),
             ),
@@ -1265,7 +1044,7 @@ class _TodoBoardState extends State<_TodoBoard> {
                 phase,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white54, fontSize: 8),
+                style: const TextStyle(color: Colors.white54, fontSize: 10),
               ),
             ),
           ],
@@ -2145,17 +1924,13 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                               child: AnimatedAlign(
                                                 duration: _moveDuration,
                                                 curve: Curves.easeInOut,
-                                                // 部屋カード間の中央の「共有フロア」は実測で幅約43px
-                                                // しかなく、キャラのドット絵は等倍(pixelSize6→42px幅)
-                                                // だとほぼ隙間と同じ幅で、どこに置いても部屋カードに
-                                                // 触れてしまっていた（実機テストで発覚、原因はAlignment
-                                                // の倍率ではなくキャラ自体のサイズだった）。下のPixelSprite
-                                                // でひとまわり小さく描画し、かつ倍率もごく小さくして
-                                                // 常に中央の安全域に収める。
-                                                alignment: Alignment(
-                                                  _zone.align.x * 0.05,
-                                                  _zone.align.y * 0.05,
-                                                ),
+                                                // 部屋カードと重ならないよう、以前はここで倍率を0.05まで
+                                                // 落として中央の隙間(実測約43px)に閉じ込めていたが、
+                                                // キャラを大きくした今はその幅に収まらず、閉じ込めても
+                                                // 結局重なる。重なってもタップは上のIgnorePointerで
+                                                // 素通しするので実害は無い。「持ち場まで歩いていく」のが
+                                                // 本来の見せ方なので、部屋の位置そのものへ移動させる。
+                                                alignment: _zone.align,
                                                 child: AnimatedBuilder(
                                                   animation: _bounce,
                                                   builder: (context, child) {
@@ -2171,7 +1946,8 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                                     );
                                                   },
                                                   child: _PixelSprite(
-                                                    pixelSize: 3.5,
+                                                    // 7列×8行なので 49×56px。
+                                                    pixelSize: 7.0,
                                                     rows:
                                                         _walking && !_walkFrameA
                                                         ? character.walk
