@@ -51,22 +51,42 @@ class TodoItem {
     required this.content,
     required this.status,
     required this.activeForm,
+    this.id = '',
     this.description = '',
+    this.source = '',
+    this.createdAt,
+    this.updatedAt,
+    this.completedAt,
   });
 
   factory TodoItem.fromJson(Map<String, dynamic> j) => TodoItem(
     content: (j['content'] as String?) ?? '',
     status: (j['status'] as String?) ?? 'pending',
     activeForm: (j['activeForm'] as String?) ?? '',
+    id: (j['id'] as String?) ?? '',
     description: (j['description'] as String?) ?? '',
+    source: (j['source'] as String?) ?? '',
+    createdAt: DateTime.tryParse((j['createdUtc'] as String?) ?? ''),
+    updatedAt: DateTime.tryParse((j['updatedUtc'] as String?) ?? ''),
+    completedAt: DateTime.tryParse((j['completedUtc'] as String?) ?? ''),
   );
+
+  /// 全体で一意なID。古いPC側からは届かないので既定は空。
+  final String id;
 
   /// タスクの説明文。詳細ページで見せる。古いPC側からは届かないので既定は空。
   final String description;
 
+  /// "claude-code" | "manual" | "gadget"。由来。
+  final String source;
+
+  /// 時刻はいずれもUTCで届く。表示時は必ずtoLocal()を通すこと。
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+  final DateTime? completedAt;
+
   final String content;
   // "pending" | "in_progress" | "completed"
-  // 現在PC側から届くのは pending/completed のみ。in_progress は将来の互換用。
   final String status;
   final String activeForm;
 }
@@ -1108,10 +1128,17 @@ class _StatsHeader extends StatelessWidget {
 }
 
 class _TodoBoard extends StatefulWidget {
-  const _TodoBoard({required this.todos, required this.color});
+  const _TodoBoard({
+    required this.todos,
+    required this.color,
+    required this.onSelect,
+  });
 
   final List<TodoItem> todos;
   final Color color;
+
+  /// 行をタップしたときに親へ選択を伝える。親は詳細ページへ切り替える。
+  final ValueChanged<TodoItem> onSelect;
 
   @override
   State<_TodoBoard> createState() => _TodoBoardState();
@@ -1397,64 +1424,224 @@ class _TodoBoardState extends State<_TodoBoard> {
       'P3' => Colors.white38,
       _ => Colors.transparent,
     };
-    return Container(
-      margin: EdgeInsets.fromLTRB(phase == null ? 16 : 12, 1, 0, 1),
-      decoration: BoxDecoration(
-        border: Border(left: BorderSide(color: priorityColor, width: 2)),
-      ),
-      padding: const EdgeInsets.symmetric(vertical: 2, horizontal: 5),
-      child: Row(
-        children: [
-          Icon(
-            active ? Icons.autorenew : Icons.radio_button_unchecked,
-            color: active ? _kMagenta : Colors.white24,
-            size: 13,
-          ),
-          const SizedBox(width: 5),
-          if (priority != null) ...[
-            Text(
-              priority,
-              style: TextStyle(
-                color: priorityColor,
-                fontSize: 10,
-                fontWeight: FontWeight.bold,
-              ),
+    return GestureDetector(
+      // 行が詰まっているので、余白も含めて押せるようにする。
+      behavior: HitTestBehavior.opaque,
+      onTap: () => widget.onSelect(task),
+      child: Container(
+        margin: EdgeInsets.fromLTRB(phase == null ? 16 : 12, 1, 0, 1),
+        decoration: BoxDecoration(
+          border: Border(left: BorderSide(color: priorityColor, width: 2)),
+        ),
+        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 5),
+        child: Row(
+          children: [
+            Icon(
+              active ? Icons.autorenew : Icons.radio_button_unchecked,
+              color: active ? _kMagenta : Colors.white24,
+              size: 13,
             ),
-            const SizedBox(width: 4),
-          ],
-          Expanded(
-            child: Text(
-              _label(task, active: active),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: Colors.white70,
-                fontSize: 12,
-                fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+            const SizedBox(width: 5),
+            if (priority != null) ...[
+              Text(
+                priority,
+                style: TextStyle(
+                  color: priorityColor,
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
-            ),
-          ),
-          if (phase != null) ...[
-            const SizedBox(width: 4),
-            Container(
-              constraints: const BoxConstraints(maxWidth: 68),
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-              decoration: BoxDecoration(
-                color: Colors.white10,
-                borderRadius: BorderRadius.circular(5),
-              ),
+              const SizedBox(width: 4),
+            ],
+            Expanded(
               child: Text(
-                phase,
+                _label(task, active: active),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white54, fontSize: 10),
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 12,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+                ),
               ),
             ),
+            if (phase != null) ...[
+              const SizedBox(width: 4),
+              Container(
+                constraints: const BoxConstraints(maxWidth: 68),
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                decoration: BoxDecoration(
+                  color: Colors.white10,
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Text(
+                  phase,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: Colors.white54, fontSize: 10),
+                ),
+              ),
+            ],
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 下半分の「タスクの詳細」。番号や件名だけでは何の作業か思い出せないので、
+/// 説明文と時刻をここで読めるようにする。一覧の行をタップすると開く。
+class _TaskDetailPanel extends StatelessWidget {
+  const _TaskDetailPanel({required this.task, required this.color});
+
+  final TodoItem? task;
+  final Color color;
+
+  static String _fmtDateTime(DateTime? t) {
+    if (t == null) return '—';
+    // PC側からはUTCで届く。toLocal()を忘れると9時間ズレる。
+    final l = t.toLocal();
+    final mm = l.month.toString().padLeft(2, '0');
+    final dd = l.day.toString().padLeft(2, '0');
+    final hh = l.hour.toString().padLeft(2, '0');
+    final mi = l.minute.toString().padLeft(2, '0');
+    return '$mm/$dd $hh:$mi';
+  }
+
+  static ({String label, Color color}) _statusChip(
+    String status,
+    Color color,
+  ) => switch (status) {
+    'in_progress' => (label: 'いま', color: _kMagenta),
+    'completed' => (label: '完了', color: Colors.white38),
+    _ => (label: '未着手', color: color),
+  };
+
+  static String _sourceLabel(String source) => switch (source) {
+    'claude-code' => 'Claude Code',
+    'manual' => '手動',
+    'gadget' => '他の号機',
+    _ => '不明',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final task = this.task;
+    if (task == null) {
+      return const Center(
+        child: Text(
+          'タスクを選ぶとここに詳しく出ます',
+          style: TextStyle(color: Colors.white38, fontSize: 12),
+        ),
+      );
+    }
+
+    final chip = _statusChip(task.status, color);
+    // 一覧と同じ解析ロジックを使う（同一ファイル内なので privateのまま呼べる）。
+    final phase = _TodoBoardState._phase(task);
+    final priority = _TodoBoardState._priority(task);
+    final title = _TodoBoardState._label(task);
+    final showActiveForm =
+        task.activeForm.isNotEmpty && task.activeForm != task.content;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              _tag(chip.label, chip.color, filled: true),
+              const SizedBox(width: 5),
+              if (priority != null) ...[
+                _tag(priority, Colors.amber),
+                const SizedBox(width: 5),
+              ],
+              _tag(phase, Colors.white38),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            title,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+              height: 1.3,
+            ),
+          ),
+          if (showActiveForm) ...[
+            const SizedBox(height: 4),
+            Text(task.activeForm, style: TextStyle(color: color, fontSize: 12)),
+          ],
+          const SizedBox(height: 10),
+          const Divider(color: Colors.white12, height: 1),
+          const SizedBox(height: 10),
+          if (task.description.isEmpty)
+            const Text(
+              // 既存タスクは完了するまで説明文が埋まらないため、その旨を出す。
+              'この作業の説明はまだ届いていません',
+              style: TextStyle(color: Colors.white24, fontSize: 12),
+            )
+          else
+            SelectableText(
+              task.description,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 12,
+                height: 1.55,
+              ),
+            ),
+          const SizedBox(height: 14),
+          const Divider(color: Colors.white12, height: 1),
+          const SizedBox(height: 8),
+          _metaRow('作成', _fmtDateTime(task.createdAt)),
+          _metaRow('更新', _fmtDateTime(task.updatedAt)),
+          if (task.completedAt != null)
+            _metaRow('完了', _fmtDateTime(task.completedAt)),
+          _metaRow('由来', _sourceLabel(task.source)),
         ],
       ),
     );
   }
+
+  Widget _tag(String text, Color c, {bool filled = false}) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color: filled ? c.withValues(alpha: 0.18) : Colors.white10,
+      borderRadius: BorderRadius.circular(5),
+      border: filled ? Border.all(color: c.withValues(alpha: 0.5)) : null,
+    ),
+    child: Text(
+      text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        color: filled ? c : Colors.white54,
+        fontSize: 10,
+        fontWeight: filled ? FontWeight.bold : FontWeight.normal,
+      ),
+    ),
+  );
+
+  Widget _metaRow(String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 2),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 36,
+          child: Text(
+            label,
+            style: const TextStyle(color: Colors.white24, fontSize: 11),
+          ),
+        ),
+        Text(
+          value,
+          style: const TextStyle(color: Colors.white54, fontSize: 11),
+        ),
+      ],
+    ),
+  );
 }
 
 /// 下半分の「実況ログ」。PC側でClaude Haikuが生成した実況コメントを新しい順に
@@ -1779,6 +1966,9 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   final List<ActivityComment> _commentLog = [];
   // 下半分の表示切り替え。0=TODO, 1=実況ログ。
   int _bottomTab = 0;
+
+  /// 詳細ページで見せるタスク。未選択なら進行中のものを既定にする。
+  TodoItem? _selectedTask;
   Timer? _idleTimer;
   Timer? _doneRevertTimer;
   Timer? _walkFrameTimer;
@@ -2257,6 +2447,32 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   }
 
   /// TODO/実況ページのどちらにいるかを示す小さなドット（タップ不要、目印だけ）。
+  /// 詳細ページに出すタスク。選択されていなければ進行中のもの、
+  /// それも無ければ一覧の先頭。スワイプで来ただけでも中身のある画面にする。
+  TodoItem? get _detailTask {
+    final selected = _selectedTask;
+    if (selected != null) {
+      // 一覧が更新されても同じタスクを追えるよう、IDで引き直す。
+      for (final task in widget.todos) {
+        if (task.id.isNotEmpty && task.id == selected.id) return task;
+      }
+      return selected;
+    }
+    for (final task in widget.todos) {
+      if (task.status == 'in_progress') return task;
+    }
+    return widget.todos.isEmpty ? null : widget.todos.first;
+  }
+
+  void _openTaskDetail(TodoItem task) {
+    setState(() => _selectedTask = task);
+    _bottomPageController.animateToPage(
+      2,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOut,
+    );
+  }
+
   Widget _bottomPageDot(int index) {
     final active = _bottomTab == index;
     final color = _status.color;
@@ -2464,6 +2680,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                           // TODO/実況ログは下のカラムをどこでも横スワイプすれば切り替わる。
                           _bottomPageDot(0),
                           _bottomPageDot(1),
+                          _bottomPageDot(2),
                         ],
                       ),
                     ),
@@ -2472,11 +2689,19 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                         controller: _bottomPageController,
                         onPageChanged: (i) => setState(() => _bottomTab = i),
                         children: [
-                          _TodoBoard(todos: widget.todos, color: _status.color),
+                          _TodoBoard(
+                            todos: widget.todos,
+                            color: _status.color,
+                            onSelect: _openTaskDetail,
+                          ),
                           _CommentaryPanel(
                             comments: _commentLog,
                             color: _status.color,
                             status: widget.haikuStatus,
+                          ),
+                          _TaskDetailPanel(
+                            task: _detailTask,
+                            color: _status.color,
                           ),
                         ],
                       ),
