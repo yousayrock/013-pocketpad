@@ -59,45 +59,30 @@ class WsServer
 
     public bool ClientConnected => _client is { Ws.State: WebSocketState.Open };
 
-    /// <summary>最後に活動があったClaude CodeセッションのTODO一覧。スマホ再起動/再接続
-    /// 直後にも最新のTODOをすぐ見せられるよう、authタイミングで自動配信する。</summary>
+    /// <summary>TODO一覧。スマホ再起動/再接続直後にも最新のTODOをすぐ見せられるよう、
+    /// authタイミングで自動配信する。</summary>
     private volatile List<object>? _lastTodos;
 
-    // ── TaskCreated/TaskCompleted専用フックから受け取る、セッション別のタスク状態 ──
-    private sealed class TaskSessionState
-    {
-        public Dictionary<string, (string content, string status, string activeForm)> Tasks { get; } = new();
-        public List<string> Order { get; } = new();
-        public DateTime LastActivityUtc { get; set; } = DateTime.UtcNow;
-    }
+    // ── TODOはセッションに紐付けず、一本のリストとして持つ ──
+    // 記憶を外に置いておくための道具なので、セッションが終わっても時間が経っても消さない。
+    // 由来（Claude Code / 手動 / 他号機）は各タスクの属性として持つだけにする。
     private readonly object _taskStateGate = new();
-    private readonly Dictionary<string, TaskSessionState> _taskSessions = new();
-    private static readonly TimeSpan _taskSessionMaxIdle = TimeSpan.FromHours(24);
-    private string? _lastActiveTaskSessionId;
+    private readonly Dictionary<string, TaskRecord> _tasks = new(StringComparer.Ordinal);
+    private readonly List<string> _taskOrder = new();
 
     /// <summary>トレイ再起動をまたいでタスク状態を保つため、%APPDATA%\PocketPad\task_state.jsonから
-    /// 復元する。このプロセスが一度も観測していないtaskIdはそもそも記録が無いため復元できない
-    /// （それ自体は元々の制約のまま）。</summary>
+    /// 復元する。v2形式のファイルはここでv3へ移行される。</summary>
     private void LoadPersistedTaskState()
     {
         var persisted = TaskStateStore.Load();
         lock (_taskStateGate)
         {
-            _taskSessions.Clear();
-            foreach (var saved in persisted.Sessions)
-            {
-                var state = new TaskSessionState { LastActivityUtc = saved.LastActivityUtc };
-                foreach (var task in saved.Tasks)
-                    state.Tasks[task.Id] = (task.Content, task.Status, task.ActiveForm);
-                state.Order.AddRange(saved.Order);
-                _taskSessions[saved.SessionId] = state;
-            }
-            _lastActiveTaskSessionId = persisted.LastActiveSessionId;
-            CleanupTaskSessionsLocked(DateTime.UtcNow);
-            _lastTodos = _lastActiveTaskSessionId is not null
-                && _taskSessions.TryGetValue(_lastActiveTaskSessionId, out var activeSession)
-                ? BuildTodosLocked(activeSession)
-                : new List<object>();
+            _tasks.Clear();
+            _taskOrder.Clear();
+            foreach (var task in persisted.Tasks)
+                _tasks[task.Id] = task;
+            _taskOrder.AddRange(persisted.Order);
+            _lastTodos = BuildTodosLocked();
             PersistTaskStateLocked();
         }
     }
@@ -105,20 +90,11 @@ class WsServer
     /// <summary>_taskStateGateを保持した状態で呼ぶこと。</summary>
     private void PersistTaskStateLocked()
     {
-        var sessions = _taskSessions.Select(pair => new TaskSessionEntry(
-            pair.Key,
-            pair.Value.LastActivityUtc,
-            new List<string>(pair.Value.Order),
-            pair.Value.Order
-                .Where(pair.Value.Tasks.ContainsKey)
-                .Select(id =>
-                {
-                    var task = pair.Value.Tasks[id];
-                    return new TaskStateEntry(id, task.content, task.status, task.activeForm);
-                })
-                .ToList()))
+        var tasks = _taskOrder
+            .Where(_tasks.ContainsKey)
+            .Select(id => _tasks[id])
             .ToList();
-        TaskStateStore.Save(_lastActiveTaskSessionId, sessions);
+        TaskStateStore.Save(tasks, new List<string>(_taskOrder));
     }
 
     // ── Haiku実況の状態 ─────────────────────────
@@ -424,38 +400,37 @@ class WsServer
         {
             return null;
         }
-        var validTaskId = taskId!;
+        // セッション内の連番IDは別セッションと衝突するため、全体で一意なIDへ張り替える。
+        var globalId = TaskStateStore.MakeClaudeTaskId(sessionId!, taskId!);
 
         lock (_taskStateGate)
         {
             var now = DateTime.UtcNow;
-            CleanupTaskSessionsLocked(now);
-            if (!_taskSessions.TryGetValue(sessionId, out var session))
-            {
-                session = new TaskSessionState();
-                _taskSessions[sessionId] = session;
-            }
-
-            session.LastActivityUtc = now;
-            _lastActiveTaskSessionId = sessionId;
             if (eventName == "TaskCreated")
             {
                 var subject = GetHookString(root, "task_subject") ?? "";
-                if (!session.Tasks.ContainsKey(validTaskId))
-                    session.Order.Add(validTaskId);
-                session.Tasks[validTaskId] = (subject, "pending", subject);
+                if (!_tasks.ContainsKey(globalId))
+                    _taskOrder.Add(globalId);
+                _tasks[globalId] = new TaskRecord(
+                    globalId, subject, subject, "pending", "claude-code", sessionId, now, now, null);
             }
-            else if (session.Tasks.TryGetValue(validTaskId, out var task))
+            else if (_tasks.TryGetValue(globalId, out var task))
             {
-                session.Tasks[validTaskId] = (task.content, "completed", task.activeForm);
+                _tasks[globalId] = task with
+                {
+                    Status = "completed",
+                    UpdatedUtc = now,
+                    CompletedUtc = now,
+                };
             }
 
-            return SnapshotTodosLocked(session);
+            return SnapshotTodosLocked();
         }
     }
 
     /// <summary>
-    /// 通常のツール活動もセッション選択に反映し、最後に活動したセッションの一覧を返す。
+    /// 通常のツール活動をきっかけに、現在のTODO一覧を配信する。
+    /// TODOはセッションに紐付かないので、どのセッションの活動でも同じ一覧を返す。
     /// </summary>
     private List<object>? ActivateTaskSession(string? sessionId)
     {
@@ -464,16 +439,7 @@ class WsServer
 
         lock (_taskStateGate)
         {
-            var now = DateTime.UtcNow;
-            CleanupTaskSessionsLocked(now);
-            if (!_taskSessions.TryGetValue(sessionId, out var session))
-            {
-                session = new TaskSessionState();
-                _taskSessions[sessionId] = session;
-            }
-            session.LastActivityUtc = now;
-            _lastActiveTaskSessionId = sessionId;
-            return SnapshotTodosLocked(session);
+            return SnapshotTodosLocked();
         }
     }
 
@@ -494,40 +460,29 @@ class WsServer
         };
     }
 
-    private void CleanupTaskSessionsLocked(DateTime now)
-    {
-        foreach (var staleKey in _taskSessions
-                     .Where(x => now - x.Value.LastActivityUtc > _taskSessionMaxIdle)
-                     .Select(x => x.Key)
-                     .ToArray())
-        {
-            _taskSessions.Remove(staleKey);
-        }
-        if (_lastActiveTaskSessionId is not null
-            && !_taskSessions.ContainsKey(_lastActiveTaskSessionId))
-        {
-            _lastActiveTaskSessionId = _taskSessions
-                .OrderByDescending(x => x.Value.LastActivityUtc)
-                .Select(x => x.Key)
-                .FirstOrDefault();
-        }
-    }
-
     /// <summary>_taskStateGateを保持した状態で呼ぶこと。</summary>
-    private List<object> SnapshotTodosLocked(TaskSessionState session)
+    private List<object> SnapshotTodosLocked()
     {
-        var result = BuildTodosLocked(session);
+        var result = BuildTodosLocked();
         PersistTaskStateLocked();
         return result;
     }
 
-    private static List<object> BuildTodosLocked(TaskSessionState session)
+    /// <summary>_taskStateGateを保持した状態で呼ぶこと。由来を問わず全TODOを返す。</summary>
+    private List<object> BuildTodosLocked()
     {
         var result = new List<object>();
-        foreach (var id in session.Order)
+        foreach (var id in _taskOrder)
         {
-            if (!session.Tasks.TryGetValue(id, out var task)) continue;
-            result.Add(new { content = task.content, status = task.status, activeForm = task.activeForm });
+            if (!_tasks.TryGetValue(id, out var task)) continue;
+            result.Add(new
+            {
+                id = task.Id,
+                content = task.Content,
+                status = task.Status,
+                activeForm = task.ActiveForm,
+                source = task.Source,
+            });
         }
         return result;
     }
