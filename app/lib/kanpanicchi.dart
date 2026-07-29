@@ -1877,118 +1877,143 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     final activity = _lastActivityByRoom[zone.roomName];
     showModalBottomSheet(
       context: context,
+      // 内容の高さぶんしか取らないと画面最下部に張り付いて押しにくいので、
+      // 画面のおよそ半分を確保して指の届く位置までせり上げる。
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF0A1020),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(zone.propIcon, color: zone.color, size: 22),
-                const SizedBox(width: 8),
-                Text(
-                  zone.roomName,
-                  style: TextStyle(
-                    color: zone.color,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                  ),
-                ),
-              ],
+      builder: (context) => SafeArea(
+        child: SingleChildScrollView(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: MediaQuery.of(context).size.height * 0.5,
             ),
-            const SizedBox(height: 14),
-            if (activity == null)
-              const Text(
-                'まだこの部屋でのお仕事はありません',
-                style: TextStyle(color: Colors.white38, fontSize: 13),
-              )
-            else ...[
-              Text(
-                '最後にしていたお仕事:',
-                style: const TextStyle(color: Colors.white38, fontSize: 12),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                _activitySentence(activity.tool, activity.detail),
-                style: TextStyle(
-                  color: zone.color,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              // ここは自分から詳しく見に来た人向けの画面なので、メインのステータス
-              // 表示とは違い、対象ファイル名/実行コマンド等の具体的な内容も見せる。
-              if (activity.detail.isNotEmpty &&
-                  _activityDetailLabel(activity.tool) != null) ...[
-                const SizedBox(height: 10),
-                Text(
-                  '${_activityDetailLabel(activity.tool)}:',
-                  style: const TextStyle(color: Colors.white38, fontSize: 12),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  activity.detail,
-                  style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 13,
-                    fontFamily: 'monospace',
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(zone.propIcon, color: zone.color, size: 22),
+                      const SizedBox(width: 8),
+                      Text(
+                        zone.roomName,
+                        style: TextStyle(
+                          color: zone.color,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                        ),
+                      ),
+                    ],
                   ),
-                  maxLines: 4,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-              const SizedBox(height: 8),
-              Text(
-                _fmtTime(activity.time),
-                style: const TextStyle(color: Colors.white24, fontSize: 12),
+                  const SizedBox(height: 14),
+                  if (activity == null)
+                    const Text(
+                      'まだこの部屋でのお仕事はありません',
+                      style: TextStyle(color: Colors.white38, fontSize: 13),
+                    )
+                  else ...[
+                    Text(
+                      '最後にしていたお仕事:',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _activitySentence(activity.tool, activity.detail),
+                      style: TextStyle(
+                        color: zone.color,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    // ここは自分から詳しく見に来た人向けの画面なので、メインのステータス
+                    // 表示とは違い、対象ファイル名/実行コマンド等の具体的な内容も見せる。
+                    if (activity.detail.isNotEmpty &&
+                        _activityDetailLabel(activity.tool) != null) ...[
+                      const SizedBox(height: 10),
+                      Text(
+                        '${_activityDetailLabel(activity.tool)}:',
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        activity.detail,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          fontFamily: 'monospace',
+                        ),
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                    const SizedBox(height: 8),
+                    Text(
+                      _fmtTime(activity.time),
+                      style: const TextStyle(
+                        color: Colors.white24,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                  if (zone == _zoneCommand) ...[
+                    const SizedBox(height: 18),
+                    const Divider(color: Colors.white12),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: zone.color,
+                          side: BorderSide(
+                            color: zone.color.withValues(alpha: 0.5),
+                          ),
+                        ),
+                        onPressed: () {
+                          Navigator.of(context).pop();
+                          _pickAndSendFile();
+                        },
+                        icon: const Icon(Icons.upload_file),
+                        label: const Text('PCにファイルを送る'),
+                      ),
+                    ),
+                  ],
+                  if (zone == _zoneSearching) ...[
+                    const SizedBox(height: 18),
+                    const Divider(color: Colors.white12),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: zone.color,
+                          side: BorderSide(
+                            color: zone.color.withValues(alpha: 0.5),
+                          ),
+                        ),
+                        onPressed: () {
+                          Navigator.of(context).pop();
+                          _showKnowledgeShelf(zone);
+                        },
+                        icon: const Icon(Icons.auto_stories),
+                        label: const Text('ナレッジを見る'),
+                      ),
+                    ),
+                  ],
+                ],
               ),
-            ],
-            if (zone == _zoneCommand) ...[
-              const SizedBox(height: 18),
-              const Divider(color: Colors.white12),
-              const SizedBox(height: 6),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: zone.color,
-                    side: BorderSide(color: zone.color.withValues(alpha: 0.5)),
-                  ),
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    _pickAndSendFile();
-                  },
-                  icon: const Icon(Icons.upload_file),
-                  label: const Text('PCにファイルを送る'),
-                ),
-              ),
-            ],
-            if (zone == _zoneSearching) ...[
-              const SizedBox(height: 18),
-              const Divider(color: Colors.white12),
-              const SizedBox(height: 6),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: zone.color,
-                    side: BorderSide(color: zone.color.withValues(alpha: 0.5)),
-                  ),
-                  onPressed: () {
-                    Navigator.of(context).pop();
-                    _showKnowledgeShelf(zone);
-                  },
-                  icon: const Icon(Icons.auto_stories),
-                  label: const Text('ナレッジを見る'),
-                ),
-              ),
-            ],
-          ],
+            ),
+          ),
         ),
       ),
     );
