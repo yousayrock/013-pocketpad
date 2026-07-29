@@ -416,10 +416,14 @@ class WsServer
             var now = DateTime.UtcNow;
             if (eventName == "TaskCreated")
             {
+                // PreToolUseで見たactiveForm → descriptionから復元したもの → 件名 の順に使う。
+                var activeForm = TakePendingActiveFormLocked(sessionId!, subject)
+                    ?? recoveredActiveForm
+                    ?? subject;
                 if (!_tasks.ContainsKey(globalId))
                     _taskOrder.Add(globalId);
                 _tasks[globalId] = new TaskRecord(
-                    globalId, subject, recoveredActiveForm ?? subject, "pending",
+                    globalId, subject, activeForm, "pending",
                     "claude-code", sessionId, now, now, null, description);
             }
             else if (_tasks.TryGetValue(globalId, out var task))
@@ -501,17 +505,31 @@ class WsServer
     /// </summary>
     private List<object>? ApplyTaskProgress(string tool, string? sessionId, JsonElement root)
     {
-        if (tool != "TaskUpdate"
-            || string.IsNullOrWhiteSpace(sessionId)
+        if (string.IsNullOrWhiteSpace(sessionId)
             || !root.TryGetProperty("tool_input", out var input)
             || input.ValueKind != JsonValueKind.Object)
         {
             return null;
         }
 
-        var status = input.TryGetProperty("status", out var statusEl)
-            && statusEl.ValueKind == JsonValueKind.String ? statusEl.GetString() : null;
-        if (status is not "in_progress")
+        var activeForm = GetInputString(input, "activeForm");
+
+        // TaskCreateはこの時点ではIDが未採番なので、件名を手がかりに一時保持し、
+        // 直後に届くTaskCreatedで引き当てる。フックはactiveFormを送ってこないため、
+        // ここで拾っておかないと「〜中」の言い回しが永久に失われる。
+        if (tool == "TaskCreate")
+        {
+            var subject = GetInputString(input, "subject");
+            if (activeForm is not null && subject is not null)
+                StashPendingActiveForm(sessionId!, subject, activeForm);
+            return null;
+        }
+
+        if (tool != "TaskUpdate")
+            return null;
+
+        var status = GetInputString(input, "status");
+        if (status is not "in_progress" && activeForm is null)
             return null;
 
         var taskId = input.TryGetProperty("taskId", out var idEl)
@@ -531,16 +549,62 @@ class WsServer
         {
             if (!_tasks.TryGetValue(globalId, out var task))
                 return null;
-            if (task.Status == "in_progress")
+
+            var nextStatus = status is "in_progress" ? "in_progress" : task.Status;
+            var nextActiveForm = activeForm ?? task.ActiveForm;
+            if (nextStatus == task.Status && nextActiveForm == task.ActiveForm)
                 return SnapshotTodosLocked();
 
             _tasks[globalId] = task with
             {
-                Status = "in_progress",
+                Status = nextStatus,
+                ActiveForm = nextActiveForm,
                 UpdatedUtc = DateTime.UtcNow,
             };
             return SnapshotTodosLocked();
         }
+    }
+
+    private static string? GetInputString(JsonElement input, string name) =>
+        input.TryGetProperty(name, out var value)
+            && value.ValueKind == JsonValueKind.String
+            && value.GetString() is { Length: > 0 } text
+            ? text
+            : null;
+
+    // PreToolUse(TaskCreate)で見たactiveFormを、TaskCreatedが届くまで一時的に置いておく。
+    // 取り違えを避けるため件数を絞り、古いものから捨てる。
+    private readonly Dictionary<string, string> _pendingActiveForms = new(StringComparer.Ordinal);
+    private readonly Queue<string> _pendingActiveFormOrder = new();
+    private const int MaxPendingActiveForms = 32;
+
+    private static string PendingActiveFormKey(string sessionId, string subject) =>
+        sessionId + " " + subject;
+
+    private void StashPendingActiveForm(string sessionId, string subject, string activeForm)
+    {
+        var key = PendingActiveFormKey(sessionId, subject);
+        lock (_taskStateGate)
+        {
+            if (!_pendingActiveForms.ContainsKey(key))
+                _pendingActiveFormOrder.Enqueue(key);
+            _pendingActiveForms[key] = activeForm;
+
+            while (_pendingActiveFormOrder.Count > MaxPendingActiveForms)
+            {
+                var oldest = _pendingActiveFormOrder.Dequeue();
+                _pendingActiveForms.Remove(oldest);
+            }
+        }
+    }
+
+    /// <summary>_taskStateGateを保持した状態で呼ぶこと。</summary>
+    private string? TakePendingActiveFormLocked(string sessionId, string subject)
+    {
+        var key = PendingActiveFormKey(sessionId, subject);
+        if (!_pendingActiveForms.Remove(key, out var activeForm))
+            return null;
+        return activeForm;
     }
 
     private static string? GetHookString(JsonElement root, string name) =>
@@ -583,6 +647,9 @@ class WsServer
                 activeForm = task.ActiveForm,
                 description = task.Description,
                 source = task.Source,
+                createdUtc = task.CreatedUtc,
+                updatedUtc = task.UpdatedUtc,
+                completedUtc = task.CompletedUtc,
             });
         }
         return result;
