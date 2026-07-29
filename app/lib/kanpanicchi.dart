@@ -51,13 +51,18 @@ class TodoItem {
     required this.content,
     required this.status,
     required this.activeForm,
+    this.description = '',
   });
 
   factory TodoItem.fromJson(Map<String, dynamic> j) => TodoItem(
     content: (j['content'] as String?) ?? '',
     status: (j['status'] as String?) ?? 'pending',
     activeForm: (j['activeForm'] as String?) ?? '',
+    description: (j['description'] as String?) ?? '',
   );
+
+  /// タスクの説明文。詳細ページで見せる。古いPC側からは届かないので既定は空。
+  final String description;
 
   final String content;
   // "pending" | "in_progress" | "completed"
@@ -377,8 +382,14 @@ const _zoneWorking = _Zone(
 _Zone _zoneFor(String tool) => _zones[tool] ?? _zoneWorking;
 
 /// "HH:mm:ss"形式の時刻表示。実況ログ・部屋詳細・資料室で共通に使う。
-String _fmtTime(DateTime t) =>
-    '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}:${t.second.toString().padLeft(2, '0')}';
+/// PC側は DateTimeOffset.Now.ToString("O") でオフセット付きの文字列を送ってくる。
+/// DartのDateTime.tryParseはそれをUTCのDateTimeとして返すため、そのまま.hourを読むと
+/// 9時間前が表示される。受信時にDateTime.now()で作られた値は既にローカルなので、
+/// toLocal()を通しても何も起きない。
+String _fmtTime(DateTime t) {
+  final local = t.toLocal();
+  return '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}:${local.second.toString().padLeft(2, '0')}';
+}
 
 /// tool_name/detailから「今これをしています」がわかる、誰にでもわかる簡単な一文を作る。
 /// ファイル名やコマンドの生の文字列はあえて出さず、小学生でも意味がわかる

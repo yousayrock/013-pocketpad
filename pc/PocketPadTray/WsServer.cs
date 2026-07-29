@@ -407,16 +407,20 @@ class WsServer
         // セッション内の連番IDは別セッションと衝突するため、全体で一意なIDへ張り替える。
         var globalId = TaskStateStore.MakeClaudeTaskId(sessionId!, taskId!);
 
+        var subject = GetHookString(root, "task_subject") ?? "";
+        var (description, recoveredActiveForm) =
+            SplitTaskDescription(GetHookString(root, "task_description") ?? "");
+
         lock (_taskStateGate)
         {
             var now = DateTime.UtcNow;
             if (eventName == "TaskCreated")
             {
-                var subject = GetHookString(root, "task_subject") ?? "";
                 if (!_tasks.ContainsKey(globalId))
                     _taskOrder.Add(globalId);
                 _tasks[globalId] = new TaskRecord(
-                    globalId, subject, subject, "pending", "claude-code", sessionId, now, now, null);
+                    globalId, subject, recoveredActiveForm ?? subject, "pending",
+                    "claude-code", sessionId, now, now, null, description);
             }
             else if (_tasks.TryGetValue(globalId, out var task))
             {
@@ -425,11 +429,51 @@ class WsServer
                     Status = "completed",
                     UpdatedUtc = now,
                     CompletedUtc = now,
+                    // 説明文を持たずに作られた古いタスクを、完了時に埋め直す。
+                    Description = task.Description.Length > 0 ? task.Description : description,
+                    ActiveForm = task.ActiveForm == task.Content && recoveredActiveForm is not null
+                        ? recoveredActiveForm
+                        : task.ActiveForm,
                 };
             }
 
             return SnapshotTodosLocked();
         }
+    }
+
+    /// <summary>
+    /// フックが渡す task_description から、説明文と activeForm を取り出す。
+    ///
+    /// タスク作成時に description パラメータが &lt;/parameter&gt; ではなく
+    /// &lt;/description&gt; で閉じられていると、続く activeForm が独立した引数として渡らず
+    /// description の文字列に飲み込まれる。実際に記録の半数で発生しており、
+    /// 素通しすると詳細表示にXMLの断片がそのまま出てしまう。
+    ///
+    /// 飲み込まれた activeForm は原文のまま残っているので、ここで切り出して復元する。
+    /// 混入が無ければ説明文をそのまま返す。
+    /// </summary>
+    private static (string Description, string? ActiveForm) SplitTaskDescription(string raw)
+    {
+        const string marker = "</description>";
+        var markerIndex = raw.IndexOf(marker, StringComparison.Ordinal);
+        if (markerIndex < 0)
+            return (raw, null);
+
+        var description = raw[..markerIndex].TrimEnd();
+        var tail = raw[(markerIndex + marker.Length)..];
+
+        const string open = "<parameter name=\"activeForm\">";
+        var openIndex = tail.IndexOf(open, StringComparison.Ordinal);
+        if (openIndex < 0)
+            return (description, null);
+
+        var value = tail[(openIndex + open.Length)..];
+        var closeIndex = value.IndexOf("</parameter>", StringComparison.Ordinal);
+        if (closeIndex >= 0)
+            value = value[..closeIndex];
+
+        value = value.Trim();
+        return (description, value.Length > 0 ? value : null);
     }
 
     /// <summary>
@@ -537,6 +581,7 @@ class WsServer
                 content = task.Content,
                 status = task.Status,
                 activeForm = task.ActiveForm,
+                description = task.Description,
                 source = task.Source,
             });
         }

@@ -11,7 +11,9 @@ record TaskRecord(
     string? SessionId,
     DateTime CreatedUtc,
     DateTime UpdatedUtc,
-    DateTime? CompletedUtc);
+    DateTime? CompletedUtc,
+    // 既存データには無い項目なので既定値を持たせる。読み込みでも欠落を許容する。
+    string Description = "");
 
 record PersistedTaskState(List<TaskRecord> Tasks, List<string> Order);
 
@@ -77,6 +79,7 @@ static class TaskStateStore
                     id = t.Id,
                     content = t.Content,
                     activeForm = t.ActiveForm,
+                    description = t.Description,
                     status = t.Status,
                     source = t.Source,
                     sessionId = t.SessionId,
@@ -283,6 +286,11 @@ static class TaskStateStore
             return false;
         }
 
+        // descriptionは後から足した項目なので、無くても読み込みを失敗させない。
+        var description = TryGetString(root, "description", out var descriptionValue)
+            ? descriptionValue
+            : "";
+
         task = new TaskRecord(
             id,
             content,
@@ -292,7 +300,8 @@ static class TaskStateStore
             sessionId,
             createdUtc,
             updatedUtc,
-            completedUtc);
+            completedUtc,
+            description);
         return true;
     }
 
