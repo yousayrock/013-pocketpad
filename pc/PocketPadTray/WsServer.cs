@@ -324,7 +324,11 @@ class WsServer
                 var sessionId = root.TryGetProperty("session_id", out var sessionProp)
                     && sessionProp.ValueKind == JsonValueKind.String ? sessionProp.GetString() : null;
                 var pushed = await PushClaudeActivityAsync(tool, detail);
-                var activeSessionTodos = ActivateTaskSession(sessionId);
+                // TaskUpdateで進行中になった瞬間を拾う。専用フックは無いが、
+                // マッチャ無しのPreToolUseが全ツール呼び出しをここへ送ってくるので、
+                // その中からタスクの状態変更だけを取り出せる。
+                var progressTodos = ApplyTaskProgress(tool, sessionId, root);
+                var activeSessionTodos = progressTodos ?? ActivateTaskSession(sessionId);
                 if (activeSessionTodos is not null)
                     await PushClaudeTodosAsync(activeSessionTodos);
                 // Haiku実況: フックの応答（Claude Codeが待つ）は遅らせず即返す。
@@ -439,6 +443,58 @@ class WsServer
 
         lock (_taskStateGate)
         {
+            return SnapshotTodosLocked();
+        }
+    }
+
+    /// <summary>
+    /// PreToolUseで届いたTaskUpdateから、タスクが進行中になったことを取り出して反映する。
+    /// 「進行中になった」専用のフックが無いため、全ツール呼び出しが流れてくるこの経路で拾う。
+    /// 対象外のツールなら null を返し、呼び出し側は通常の一覧配信にフォールバックする。
+    ///
+    /// PreToolUseはツール実行の直前に発火するので、これは「これからやる」時点での楽観的な更新。
+    /// TaskUpdateが失敗した場合は実態とズレるが、次の活動で上書きされるため実害は小さい。
+    /// </summary>
+    private List<object>? ApplyTaskProgress(string tool, string? sessionId, JsonElement root)
+    {
+        if (tool != "TaskUpdate"
+            || string.IsNullOrWhiteSpace(sessionId)
+            || !root.TryGetProperty("tool_input", out var input)
+            || input.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var status = input.TryGetProperty("status", out var statusEl)
+            && statusEl.ValueKind == JsonValueKind.String ? statusEl.GetString() : null;
+        if (status is not "in_progress")
+            return null;
+
+        var taskId = input.TryGetProperty("taskId", out var idEl)
+            ? idEl.ValueKind switch
+            {
+                JsonValueKind.String => idEl.GetString(),
+                JsonValueKind.Number => idEl.GetRawText(),
+                _ => null,
+            }
+            : null;
+        if (!TaskStateStore.IsClaudeTaskId(taskId))
+            return null;
+
+        var globalId = TaskStateStore.MakeClaudeTaskId(sessionId!, taskId!);
+
+        lock (_taskStateGate)
+        {
+            if (!_tasks.TryGetValue(globalId, out var task))
+                return null;
+            if (task.Status == "in_progress")
+                return SnapshotTodosLocked();
+
+            _tasks[globalId] = task with
+            {
+                Status = "in_progress",
+                UpdatedUtc = DateTime.UtcNow,
+            };
             return SnapshotTodosLocked();
         }
     }
