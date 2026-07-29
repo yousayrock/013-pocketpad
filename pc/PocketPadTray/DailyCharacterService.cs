@@ -47,6 +47,39 @@ static class DailyCharacterService
         var existing = DailyCharacterStore.Load();
         if (!force && existing.Date == today && existing.Status is "ready" or "holiday") return;
 
+        if (existing.Date != today && existing.Status is "ready" or "holiday")
+        {
+            // 姿の保存を最優先で先に済ませる。引退メッセージの生成はCodex呼び出しで
+            // 数分かかることがあり、その最中にトレイが落ちると前日の個体を永久に失うため、
+            // 「メッセージ無しで確定保存 → 生成できたら追記」の二段構えにする。
+            var archived = false;
+            try
+            {
+                CharacterArchiveStore.Save(existing, null);
+                archived = true;
+            }
+            catch (Exception ex)
+            {
+                // 図鑑の障害で日次生成まで止めると、翌日のキャラクターも失われるため続行する。
+                ErrorLog.Append("DailyCharacterService.ArchivePrevious", ex);
+            }
+
+            if (archived)
+            {
+                try
+                {
+                    var retirementMessage = await GenerateRetirementMessageAsync(existing);
+                    if (!string.IsNullOrWhiteSpace(retirementMessage))
+                        CharacterArchiveStore.Save(existing, retirementMessage);
+                }
+                catch (Exception ex)
+                {
+                    // メッセージは必須項目ではない。失敗しても姿は既に図鑑に残っている。
+                    ErrorLog.Append("DailyCharacterService.GenerateRetirementMessage", ex);
+                }
+            }
+        }
+
         // 直前の完成キャラは表示にだけ使い、今日の生成状態には姿・テーマ・性格を引き継がない。
         DailyCharacterStore.SetDisplayOverride(existing);
         var working = DailyCharacterStore.CreateDefault(today);
@@ -232,6 +265,12 @@ static class DailyCharacterService
         }
 
         var sb = new StringBuilder();
+        var recentThemes = CharacterArchiveStore.LoadRecentThemes();
+        if (recentThemes.Count > 0)
+        {
+            sb.AppendLine($"直近{recentThemes.Count}体のtheme: {string.Join(" / ", recentThemes)}");
+            sb.AppendLine("上記themeとの完全一致は避けてください。ただし類似テーマや、将来の同じテーマの再登場は禁止しません。themeをIDや一意キーとして扱わないでください。");
+        }
         sb.AppendLine("paletteは固定スロットc1〜c6です。各値に#RRGGBB形式の色を1色ずつ設定してください。");
         sb.AppendLine("ドット絵ではc1〜c6に対応する文字'1'〜'6'を使い、'.'は透明として使ってください。");
         sb.AppendLine("bg、dot、paletteの全色は#RRGGBB形式にしてください。transparent、色名、CSS単位は使えません。");
@@ -261,6 +300,103 @@ static class DailyCharacterService
                 $"要約:{Trim(OneLine(x.entry.Summary), 200)}");
         }
         return sb.Length <= 6000 ? sb.ToString() : sb.ToString(0, 6000);
+    }
+
+    static async Task<string?> GenerateRetirementMessageAsync(DailyCharacter character)
+    {
+        var entries = KnowledgeStore.Load()
+            .Select(e => (entry: e, time: ParseLocal(e.Timestamp)))
+            .Where(x => x.time is not null
+                && DailyCharacterStore.DayKey(x.time.Value) == character.Date)
+            .OrderBy(x => x.time)
+            .Take(20)
+            .ToList();
+
+        var facts = entries.Count == 0
+            ? "記録なし"
+            : string.Join("\n", entries.Select(x =>
+                $"- {x.time:HH:mm} {x.entry.Project}: {Trim(OneLine(x.entry.Summary), 240)}"));
+        var holidayRule = character.Status == "holiday"
+            ? "この日は休日です。休んだことを責めず、休息を肯定する前向きな言葉にしてください。"
+            : "";
+        var prompt = $"""
+            役目を終えるキャラクターから持ち主への短い引退メッセージを、日本語で60〜120文字程度、本文だけで書いてください。
+            キャラクターのthemeは「{character.Theme}」、性格は「{character.Personality}」です。
+            {holidayRule}
+            次の作業記録だけを事実として使ってください。
+            {facts}
+
+            安全ルール:
+            記録にない作業、結果、成功、感情、予定を、実際にあったこととして捏造しないでください。
+            不明なことは断定せず、記録なしの場合は具体的な作業をしたとは書かないでください。
+            やっていないことを「やった」「完成した」「直した」などと表現しないでください。
+            """;
+        return await RunCodexTextAsync(prompt);
+    }
+
+    static async Task<string?> RunCodexTextAsync(string prompt)
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "PocketPadRetirement", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        var outputPath = Path.Combine(tempDir, "output.txt");
+        try
+        {
+            var (nodeExe, codexJs) = ResolveCodexEntry();
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = nodeExe,
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardInputEncoding = new UTF8Encoding(false),
+                StandardOutputEncoding = new UTF8Encoding(false),
+                StandardErrorEncoding = new UTF8Encoding(false),
+            };
+            startInfo.ArgumentList.Add(codexJs);
+            startInfo.ArgumentList.Add("exec");
+            startInfo.ArgumentList.Add("--skip-git-repo-check");
+            startInfo.ArgumentList.Add("-C");
+            startInfo.ArgumentList.Add(tempDir);
+            startInfo.ArgumentList.Add("-s");
+            startInfo.ArgumentList.Add("read-only");
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add("approval_policy=never");
+            startInfo.ArgumentList.Add("--color");
+            startInfo.ArgumentList.Add("never");
+            startInfo.ArgumentList.Add("-o");
+            startInfo.ArgumentList.Add(outputPath);
+            startInfo.ArgumentList.Add("-");
+            using var proc = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("codexプロセスを開始できませんでした");
+            var stdout = proc.StandardOutput.ReadToEndAsync();
+            var stderr = proc.StandardError.ReadToEndAsync();
+            await proc.StandardInput.WriteAsync(prompt);
+            proc.StandardInput.Close();
+            using var timeout = new CancellationTokenSource(Timeout);
+            try
+            {
+                await proc.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch (Exception) { }
+                await Task.WhenAll(stdout, stderr);
+                throw new TimeoutException("codexによる引退メッセージ生成がタイムアウトしました");
+            }
+            await Task.WhenAll(stdout, stderr);
+            if (proc.ExitCode != 0)
+                throw new InvalidOperationException(
+                    $"codexが終了コード{proc.ExitCode}を返しました: {TrimTail(stderr.Result, 500)}");
+            if (!File.Exists(outputPath)) return null;
+            var text = OneLine(await File.ReadAllTextAsync(outputPath)).Trim().Trim('"');
+            return string.IsNullOrWhiteSpace(text) ? null : Trim(text, 160);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, recursive: true); } catch (Exception) { }
+        }
     }
 
     static DateTime? ParseLocal(string value)

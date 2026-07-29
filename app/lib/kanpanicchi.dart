@@ -226,6 +226,86 @@ class DailyCharacter {
   final List<String> blink;
 }
 
+/// 図鑑の月一覧で使う軽量データ。365体まで増えても、詳細本文や全フレームを
+/// 抱えずに済むよう、PC側の月別レスポンスと同じ項目だけを持つ。
+class ArchiveEntry {
+  const ArchiveEntry({
+    required this.date,
+    required this.theme,
+    required this.status,
+    required this.stand,
+    required this.palette,
+  });
+
+  factory ArchiveEntry.fromJson(Map<String, dynamic> j) => ArchiveEntry(
+    date: (j['date'] as String?) ?? '',
+    theme: (j['theme'] as String?) ?? '',
+    status: j['status'] == 'holiday' ? 'holiday' : 'ready',
+    stand: _archiveRows(j['stand']),
+    palette: _archivePalette(j['palette']),
+  );
+
+  final String date;
+  final String theme;
+  final String status;
+  final List<String> stand;
+  final Map<String, Color> palette;
+}
+
+/// 図鑑の詳細1件。アプリには永続化せず、詳細を開くたびPCから受け取る。
+class ArchiveDetail {
+  const ArchiveDetail({
+    required this.date,
+    required this.theme,
+    required this.reason,
+    required this.message,
+    required this.status,
+    required this.stand,
+    required this.walk,
+    required this.blink,
+    required this.palette,
+  });
+
+  factory ArchiveDetail.fromJson(Map<String, dynamic> j) => ArchiveDetail(
+    date: (j['date'] as String?) ?? '',
+    theme: (j['theme'] as String?) ?? '',
+    reason: (j['reason'] as String?) ?? '',
+    message: (j['message'] as String?) ?? '',
+    status: j['status'] == 'holiday' ? 'holiday' : 'ready',
+    stand: _archiveRows(j['stand']),
+    walk: _archiveRows(j['walk']),
+    blink: _archiveRows(j['blink']),
+    palette: _archivePalette(j['palette']),
+  );
+
+  final String date;
+  final String theme;
+  final String reason;
+  final String message;
+  final String status;
+  final List<String> stand;
+  final List<String> walk;
+  final List<String> blink;
+  final Map<String, Color> palette;
+}
+
+List<String> _archiveRows(dynamic value) {
+  if (value is! List || value.length != 8) return _spriteStand;
+  final rows = [for (final row in value) row.toString()];
+  return rows.every((row) => row.length == 7) ? rows : _spriteStand;
+}
+
+Map<String, Color> _archivePalette(dynamic value) {
+  if (value is! Map) return _defaultSpritePalette;
+  final result = <String, Color>{};
+  for (final entry in value.entries) {
+    final color = DailyCharacter._parseColor(entry.value);
+    if (color == null) return _defaultSpritePalette;
+    result[entry.key.toString()] = color;
+  }
+  return result.isEmpty ? _defaultSpritePalette : result;
+}
+
 /// オフィス内の「持ち場」。キャラクターがこの位置(Alignment)へ移動する。
 class _Zone {
   const _Zone(this.align, this.propIcon, this.verb, this.roomName, this.color);
@@ -268,10 +348,10 @@ const _zoneSearching = _Zone(
 );
 const _zoneDelegating = _Zone(
   Alignment(0.7, 0.8),
-  Icons.groups,
-  '委任中',
-  '会議室',
-  _kMagenta,
+  Icons.collections_bookmark,
+  '閲覧用',
+  '図鑑室',
+  Color(0xFF66E0A3),
 );
 
 /// tool_name → ゾーンのマッピング。ここに無いツールは中央「作業中」扱い。
@@ -285,7 +365,6 @@ const _zones = <String, _Zone>{
   'Glob': _zoneSearching,
   'WebSearch': _zoneSearching,
   'WebFetch': _zoneSearching,
-  'Task': _zoneDelegating,
 };
 const _zoneWorking = _Zone(
   Alignment.center,
@@ -562,6 +641,319 @@ class _RoomCard extends StatelessWidget {
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 図鑑室の一覧。最初は今月だけを読み、下のボタンを押した時だけ前月を足す。
+/// 長期運用でも一度に全件を通信せず、月見出し単位で見渡せるようにする。
+class _ArchivePage extends StatefulWidget {
+  const _ArchivePage({
+    required this.color,
+    required this.loadMonth,
+    required this.loadDetail,
+  });
+
+  final Color color;
+  final Future<List<ArchiveEntry>> Function(String month) loadMonth;
+  final Future<ArchiveDetail?> Function(String date) loadDetail;
+
+  @override
+  State<_ArchivePage> createState() => _ArchivePageState();
+}
+
+class _ArchivePageState extends State<_ArchivePage> {
+  final Map<String, List<ArchiveEntry>?> _months = {};
+  late DateTime _oldestMonth;
+
+  @override
+  void initState() {
+    super.initState();
+    final now = DateTime.now();
+    _oldestMonth = DateTime(now.year, now.month);
+    _load(_oldestMonth);
+  }
+
+  String _monthKey(DateTime month) =>
+      '${month.year.toString().padLeft(4, '0')}-${month.month.toString().padLeft(2, '0')}';
+
+  Future<void> _load(DateTime month) async {
+    final key = _monthKey(month);
+    if (_months.containsKey(key)) return;
+    setState(() => _months[key] = null);
+    final entries = await widget.loadMonth(key);
+    if (!mounted) return;
+    setState(() => _months[key] = entries);
+  }
+
+  void _loadPreviousMonth() {
+    _oldestMonth = DateTime(_oldestMonth.year, _oldestMonth.month - 1);
+    _load(_oldestMonth);
+  }
+
+  Future<void> _openDetail(ArchiveEntry entry) async {
+    final detail = await widget.loadDetail(entry.date);
+    if (!mounted) return;
+    if (detail == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('この日の詳しい記録を取得できませんでした')));
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF0A1020),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) =>
+          _ArchiveDetailSheet(detail: detail, color: widget.color),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final keys = _months.keys.toList()..sort((a, b) => b.compareTo(a));
+    final hasAny = _months.values.any((entries) => entries?.isNotEmpty == true);
+    final loading = _months.values.any((entries) => entries == null);
+    return Scaffold(
+      backgroundColor: const Color(0xFF070B16),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF0A1020),
+        foregroundColor: widget.color,
+        title: const Text('図鑑室'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 28),
+        children: [
+          for (final key in keys) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 8, 4, 8),
+              child: Text(
+                key,
+                style: TextStyle(
+                  color: widget.color,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            if (_months[key] == null)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 22),
+                child: Center(child: CircularProgressIndicator()),
+              )
+            else if (_months[key]!.isNotEmpty)
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: _months[key]!.length,
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 6,
+                  childAspectRatio: 0.78,
+                  crossAxisSpacing: 5,
+                  mainAxisSpacing: 7,
+                ),
+                itemBuilder: (context, index) {
+                  final entry = _months[key]![index];
+                  return InkWell(
+                    onTap: () => _openDetail(entry),
+                    borderRadius: BorderRadius.circular(9),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: entry.status == 'holiday'
+                            ? _kMagenta.withValues(alpha: 0.09)
+                            : Colors.white.withValues(alpha: 0.04),
+                        borderRadius: BorderRadius.circular(9),
+                        border: Border.all(
+                          color: entry.status == 'holiday'
+                              ? _kMagenta.withValues(alpha: 0.35)
+                              : Colors.white12,
+                        ),
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          _PixelSprite(
+                            rows: entry.stand,
+                            glow: widget.color,
+                            palette: entry.palette,
+                            pixelSize: 4.5,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            entry.date.length >= 10
+                                ? entry.date.substring(8, 10)
+                                : entry.date,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+          ],
+          if (!loading && !hasAny)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 28),
+              child: Column(
+                children: [
+                  Icon(
+                    Icons.collections_bookmark,
+                    color: Colors.white24,
+                    size: 42,
+                  ),
+                  SizedBox(height: 10),
+                  Text('まだ記録がありません', style: TextStyle(color: Colors.white38)),
+                ],
+              ),
+            ),
+          const SizedBox(height: 18),
+          OutlinedButton.icon(
+            onPressed: _loadPreviousMonth,
+            icon: const Icon(Icons.expand_more),
+            label: const Text('前の月を読み込む'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: widget.color,
+              side: BorderSide(color: widget.color.withValues(alpha: 0.45)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ArchiveDetailSheet extends StatefulWidget {
+  const _ArchiveDetailSheet({required this.detail, required this.color});
+
+  final ArchiveDetail detail;
+  final Color color;
+
+  @override
+  State<_ArchiveDetailSheet> createState() => _ArchiveDetailSheetState();
+}
+
+class _ArchiveDetailSheetState extends State<_ArchiveDetailSheet> {
+  Timer? _timer;
+  int _frame = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    // 立つ→歩く→立つ→瞬きの短い周期にし、歩行と瞬きの両方が狭い詳細画面でも
+    // すぐ確認できるようにする。
+    _timer = Timer.periodic(const Duration(milliseconds: 420), (_) {
+      if (mounted) setState(() => _frame = (_frame + 1) % 4);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final detail = widget.detail;
+    final rows = switch (_frame) {
+      1 => detail.walk,
+      3 => detail.blink,
+      _ => detail.stand,
+    };
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          20,
+          20,
+          20,
+          20 + MediaQuery.viewInsetsOf(context).bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: widget.color.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: _PixelSprite(
+                    rows: rows,
+                    glow: widget.color,
+                    palette: detail.palette,
+                    pixelSize: 7,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        detail.date,
+                        style: TextStyle(
+                          color: widget.color,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 16,
+                        ),
+                      ),
+                      if (detail.status == 'holiday') ...[
+                        const SizedBox(height: 7),
+                        const Chip(
+                          avatar: Icon(Icons.beach_access, size: 16),
+                          label: Text('休日'),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            Text(
+              detail.theme,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            if (detail.reason.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Text(
+                detail.reason,
+                style: const TextStyle(color: Colors.white70, height: 1.5),
+              ),
+            ],
+            if (detail.message.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              const Divider(color: Colors.white12),
+              const SizedBox(height: 10),
+              const Text(
+                'メッセージ',
+                style: TextStyle(color: Colors.white38, fontSize: 12),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                detail.message,
+                style: const TextStyle(color: Colors.white, height: 1.5),
+              ),
+            ],
+          ],
         ),
       ),
     );
@@ -1306,7 +1698,8 @@ class _KnowledgeCard extends StatelessWidget {
 
 /// 「かんぱにっち」ページ。Claude Codeが今何をしているかを日替わりの
 /// ドット絵キャラクターで見せるビューワー。
-/// オフィス内の持ち場（編集/コマンド/調査/委任/待機）を活動に応じて移動する。
+/// オフィス内の持ち場（編集/コマンド/調査/待機）を活動に応じて移動する。
+/// 図鑑室は活動先ではなく、過去の日替わりキャラクターを閲覧する入口。
 /// 上半分はデフォルトでこのオフィス表示、右上のボタンでトラックパッドに開閉できる。
 class KanpanicchiPanel extends StatefulWidget {
   const KanpanicchiPanel({
@@ -1319,6 +1712,8 @@ class KanpanicchiPanel extends StatefulWidget {
     required this.commentHistory,
     required this.haikuStatus,
     required this.character,
+    required this.loadArchiveMonth,
+    required this.loadArchiveDetail,
     required this.connKind,
     required this.onMove,
     required this.onScroll,
@@ -1335,6 +1730,8 @@ class KanpanicchiPanel extends StatefulWidget {
   final List<ActivityComment> commentHistory;
   final HaikuStatus? haikuStatus;
   final DailyCharacter character;
+  final Future<List<ArchiveEntry>> Function(String month) loadArchiveMonth;
+  final Future<ArchiveDetail?> Function(String date) loadArchiveDetail;
 
   /// 今の接続経路（自宅LAN/外出先）。画面隅の小さなバッジ表示にのみ使う。
   final ConnKind connKind;
@@ -1465,6 +1862,18 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   /// 部屋タップ時、その部屋での直近の活動を詳しく見せる（メインの一言は
   /// あえて簡略化しているため、気になる人向けに生のツール名/対象を出す）。
   void _showRoomDetail(_Zone zone) {
+    if (zone == _zoneDelegating) {
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (context) => _ArchivePage(
+            color: zone.color,
+            loadMonth: widget.loadArchiveMonth,
+            loadDetail: widget.loadArchiveDetail,
+          ),
+        ),
+      );
+      return;
+    }
     final activity = _lastActivityByRoom[zone.roomName];
     showModalBottomSheet(
       context: context,

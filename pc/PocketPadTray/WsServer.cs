@@ -744,6 +744,66 @@ class WsServer
         }
     }
 
+    public async Task<bool> PushCharacterArchiveAsync(string month)
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            // 一覧ではアニメーション等を送らず、月の遅延読込に必要な最小データだけにする。
+            var entries = CharacterArchiveStore.LoadMonth(month).Select(c => new
+            {
+                date = c.Date,
+                theme = c.Theme,
+                status = c.Status,
+                stand = c.Stand,
+                palette = c.Palette,
+            });
+            await SendJsonAsync(conn, new { type = "claude_archive", month, entries });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Append("PushCharacterArchive", ex);
+            return false;
+        }
+    }
+
+    public async Task<bool> PushCharacterArchiveDetailAsync(string date)
+    {
+        var conn = _client;
+        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        try
+        {
+            var found = CharacterArchiveStore.LoadDetail(date);
+            // SendJsonAsyncはオプション無しのJsonSerializerなので、クラスをそのまま渡すと
+            // プロパティ名がPascalCaseで出てアプリ側（小文字キーで読む）が全項目を取り違える。
+            // 一覧側と同じく、送る形を匿名型で明示する。
+            var entry = found is null ? null : new
+            {
+                date = found.Date,
+                theme = found.Theme,
+                reason = found.Reason,
+                personality = found.Personality,
+                status = found.Status,
+                stand = found.Stand,
+                walk = found.Walk,
+                blink = found.Blink,
+                palette = found.Palette,
+                bg = found.Bg,
+                dot = found.Dot,
+                message = found.Message,
+            };
+            await SendJsonAsync(conn, new { type = "claude_archive_detail", date, entry });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Append("PushCharacterArchiveDetail", ex);
+            return false;
+        }
+    }
+
     private static readonly HttpClient _anthropicHttp = new()
     {
         BaseAddress = new Uri("https://api.anthropic.com/"),
@@ -1472,6 +1532,16 @@ class WsServer
 
             case "daily_character_get":
                 await PushDailyCharacterAsync();
+                break;
+
+            case "claude_archive_get":
+                await PushCharacterArchiveAsync(
+                    root.TryGetProperty("month", out var monthEl) ? monthEl.GetString() ?? "" : "");
+                break;
+
+            case "claude_archive_detail_get":
+                await PushCharacterArchiveDetailAsync(
+                    root.TryGetProperty("date", out var dateEl) ? dateEl.GetString() ?? "" : "");
                 break;
 
             case "config_set":

@@ -668,6 +668,10 @@ class _TrackpadScreenState extends State<TrackpadScreen>
   HaikuStatus? _haikuStatus;
   List<KnowledgeEntry> _lastKnowledge = [];
   DailyCharacter _dailyCharacter = DailyCharacter.fallback;
+  // 図鑑は接続ごとにPCを正とし、端末には保存しない。月・日の応答待ちだけを
+  // メモリに置き、画面を閉じたり再接続した後に古い内容を残さない。
+  final Map<String, Completer<List<ArchiveEntry>>> _archiveMonthRequests = {};
+  final Map<String, Completer<ArchiveDetail?>> _archiveDetailRequests = {};
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
   bool _micListening = false;
@@ -814,6 +818,27 @@ class _TrackpadScreenState extends State<TrackpadScreen>
       );
     } else if (j['type'] == 'daily_character') {
       setState(() => _dailyCharacter = DailyCharacter.fromJson(j));
+    } else if (j['type'] == 'claude_archive') {
+      final month = (j['month'] as String?) ?? '';
+      final raw = (j['entries'] as List?) ?? const [];
+      final completer = _archiveMonthRequests.remove(month);
+      if (completer != null && !completer.isCompleted) {
+        completer.complete([
+          for (final e in raw)
+            if (e is Map) ArchiveEntry.fromJson(e.cast<String, dynamic>()),
+        ]);
+      }
+    } else if (j['type'] == 'claude_archive_detail') {
+      final date = (j['date'] as String?) ?? '';
+      final completer = _archiveDetailRequests.remove(date);
+      final raw = j['entry'];
+      if (completer != null && !completer.isCompleted) {
+        completer.complete(
+          raw is Map
+              ? ArchiveDetail.fromJson(raw.cast<String, dynamic>())
+              : null,
+        );
+      }
     } else if (j['type'] == 'claude_activity_comment') {
       final text = (j['text'] as String?) ?? '';
       if (text.isNotEmpty) {
@@ -869,6 +894,38 @@ class _TrackpadScreenState extends State<TrackpadScreen>
   /// 現在設定をPCへ送って保存させる（AppSettings.saveのフックからも呼ばれる）。
   void _pushConfig(Map<String, dynamic> json) =>
       _sendJson({'type': 'config_set', 'settings': json});
+
+  Future<List<ArchiveEntry>> _loadArchiveMonth(String month) {
+    final pending = _archiveMonthRequests[month];
+    if (pending != null) return pending.future;
+    final completer = Completer<List<ArchiveEntry>>();
+    _archiveMonthRequests[month] = completer;
+    _sendJson({'type': 'claude_archive_get', 'month': month});
+    // 旧PCトレイはこのメッセージへ応答しないため、待ち続けて空画面に
+    // ならないよう空一覧へ着地させる。新トレイなら通常は即時応答する。
+    return completer.future.timeout(
+      const Duration(seconds: 2),
+      onTimeout: () {
+        _archiveMonthRequests.remove(month);
+        return const <ArchiveEntry>[];
+      },
+    );
+  }
+
+  Future<ArchiveDetail?> _loadArchiveDetail(String date) {
+    final pending = _archiveDetailRequests[date];
+    if (pending != null) return pending.future;
+    final completer = Completer<ArchiveDetail?>();
+    _archiveDetailRequests[date] = completer;
+    _sendJson({'type': 'claude_archive_detail_get', 'date': date});
+    return completer.future.timeout(
+      const Duration(seconds: 2),
+      onTimeout: () {
+        _archiveDetailRequests.remove(date);
+        return null;
+      },
+    );
+  }
 
   void _disconnected() {
     // ping timeout・onDone・onError は同じ切断で続けて発火し得る。
@@ -1130,6 +1187,8 @@ class _TrackpadScreenState extends State<TrackpadScreen>
           commentHistory: _commentHistory,
           haikuStatus: _haikuStatus,
           character: _dailyCharacter,
+          loadArchiveMonth: _loadArchiveMonth,
+          loadArchiveDetail: _loadArchiveDetail,
           connKind: widget.connKind,
           onMove: _move,
           onScroll: _onScrollDelta,
