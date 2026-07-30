@@ -1210,6 +1210,7 @@ class _TrackpadScreenState extends State<TrackpadScreen>
             'filename': filename,
             'data': base64,
           }),
+          onTaskCommand: _sendJson,
         );
       case 'youtube':
         return YoutubePanel(

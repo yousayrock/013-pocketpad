@@ -1142,6 +1142,7 @@ class _TodoBoard extends StatefulWidget {
     required this.todos,
     required this.color,
     required this.onSelect,
+    required this.onCommand,
   });
 
   final List<TodoItem> todos;
@@ -1149,6 +1150,9 @@ class _TodoBoard extends StatefulWidget {
 
   /// 行をタップしたときに親へ選択を伝える。親は詳細ページへ切り替える。
   final ValueChanged<TodoItem> onSelect;
+
+  /// TODOの追加・編集をPCへ送る。
+  final void Function(Map<String, dynamic> message) onCommand;
 
   @override
   State<_TodoBoard> createState() => _TodoBoardState();
@@ -1193,15 +1197,44 @@ class _TodoBoardState extends State<_TodoBoard> {
     },
   };
 
+  /// TODOを自分で足すシート。追加後の一覧はPCからの再配信で更新される。
+  Future<void> _openAddSheet() async {
+    final draft = await showModalBottomSheet<_TaskDraft>(
+      context: context,
+      backgroundColor: const Color(0xFF14161C),
+      isScrollControlled: true,
+      builder: (_) => _TaskAddSheet(color: widget.color),
+    );
+    if (draft == null) return;
+    widget.onCommand({
+      'type': 'task_add',
+      'content': draft.content,
+      'description': draft.description,
+      'priority': draft.priority,
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final tasks = widget.todos;
     if (tasks.isEmpty) {
       return Center(
-        child: Text(
-          'Claude CodeがTODOを作ると\nここに一覧が表示されます',
-          textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.white24, fontSize: 11),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Claude CodeがTODOを作ると\nここに一覧が表示されます',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white24, fontSize: 11),
+            ),
+            const SizedBox(height: 10),
+            TextButton.icon(
+              onPressed: _openAddSheet,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('自分で足す', style: TextStyle(fontSize: 12)),
+              style: TextButton.styleFrom(foregroundColor: widget.color),
+            ),
+          ],
         ),
       );
     }
@@ -1259,6 +1292,16 @@ class _TodoBoardState extends State<_TodoBoard> {
                   Text(
                     '$done/${tasks.length}  残り${remaining.length}件',
                     style: const TextStyle(color: Colors.white60, fontSize: 10),
+                  ),
+                  const SizedBox(width: 4),
+                  // 買い物や手続きといった日常のTODOも、ここから同じ一覧へ入れる。
+                  InkWell(
+                    onTap: _openAddSheet,
+                    borderRadius: BorderRadius.circular(11),
+                    child: Padding(
+                      padding: const EdgeInsets.all(3),
+                      child: Icon(Icons.add, size: 15, color: widget.color),
+                    ),
                   ),
                 ],
               ),
@@ -1424,25 +1467,31 @@ class _TodoBoardState extends State<_TodoBoard> {
   }
 
   Widget _completedTaskRow(TodoItem task) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 2, 0, 2),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.check_circle_outline,
-            color: Colors.white24,
-            size: 13,
-          ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              _label(task),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.white38, fontSize: 12),
+    // 完了した行も選べるようにする。ここを塞ぐと「未完了に戻す」「消す」へ
+    // 辿り着けなくなる（間違えて完了にしたものを直せない）。
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => widget.onSelect(task),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 2, 0, 2),
+        child: Row(
+          children: [
+            const Icon(
+              Icons.check_circle_outline,
+              color: Colors.white24,
+              size: 13,
             ),
-          ),
-        ],
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(
+                _label(task),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white38, fontSize: 12),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1569,11 +1618,182 @@ class _TodoBoardState extends State<_TodoBoard> {
 
 /// 下半分の「タスクの詳細」。番号や件名だけでは何の作業か思い出せないので、
 /// 説明文と時刻をここで読めるようにする。一覧の行をタップすると開く。
+/// 追加シートが返す内容。優先度は未設定なら空文字。
+class _TaskDraft {
+  const _TaskDraft(this.content, this.description, this.priority);
+  final String content;
+  final String description;
+  final String priority;
+}
+
+/// 日常のTODOを手で足すためのシート。買い物や手続きも同じ一覧に入れたいので、
+/// 入力は「内容」だけを必須にして、説明と優先度は任意にしてある。
+class _TaskAddSheet extends StatefulWidget {
+  const _TaskAddSheet({required this.color});
+
+  final Color color;
+
+  @override
+  State<_TaskAddSheet> createState() => _TaskAddSheetState();
+}
+
+class _TaskAddSheetState extends State<_TaskAddSheet> {
+  final _content = TextEditingController();
+  final _description = TextEditingController();
+  String _priority = '';
+
+  @override
+  void dispose() {
+    _content.dispose();
+    _description.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final content = _content.text.trim();
+    if (content.isEmpty) return;
+    Navigator.pop(
+      context,
+      _TaskDraft(content, _description.text.trim(), _priority),
+    );
+  }
+
+  InputDecoration _decoration(String hint) => InputDecoration(
+    hintText: hint,
+    hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
+    isDense: true,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(8),
+      borderSide: const BorderSide(color: Colors.white12),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(8),
+      borderSide: BorderSide(color: widget.color),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: Padding(
+      // キーボードのぶんだけ押し上げる。入れないと入力欄が隠れる。
+      padding: EdgeInsets.fromLTRB(
+        16,
+        14,
+        16,
+        16 + MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'TODOを足す',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _content,
+            autofocus: true,
+            textInputAction: TextInputAction.done,
+            onSubmitted: (_) => _submit(),
+            style: const TextStyle(color: Colors.white, fontSize: 14),
+            decoration: _decoration('やること（例: 灯油を買う）'),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: _description,
+            maxLines: 3,
+            minLines: 2,
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
+            decoration: _decoration('メモ（任意）'),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const Text(
+                '優先度',
+                style: TextStyle(color: Colors.white38, fontSize: 11),
+              ),
+              const SizedBox(width: 8),
+              for (final value in const ['', 'P1', 'P2', 'P3'])
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: _priorityChip(value),
+                ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                style: TextButton.styleFrom(foregroundColor: Colors.white38),
+                child: const Text('やめる'),
+              ),
+              const SizedBox(width: 6),
+              FilledButton(
+                onPressed: _submit,
+                style: FilledButton.styleFrom(backgroundColor: widget.color),
+                child: const Text('足す'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+
+  Widget _priorityChip(String value) {
+    final selected = _priority == value;
+    return InkWell(
+      onTap: () => setState(() => _priority = value),
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+        decoration: BoxDecoration(
+          color: selected
+              ? widget.color.withValues(alpha: 0.2)
+              : Colors.white10,
+          borderRadius: BorderRadius.circular(6),
+          border: selected ? Border.all(color: widget.color) : null,
+        ),
+        child: Text(
+          value.isEmpty ? 'なし' : value,
+          style: TextStyle(
+            color: selected ? widget.color : Colors.white54,
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _TaskDetailPanel extends StatelessWidget {
-  const _TaskDetailPanel({required this.task, required this.color});
+  const _TaskDetailPanel({
+    required this.task,
+    required this.color,
+    required this.onCommand,
+    required this.actionable,
+  });
 
   final TodoItem? task;
   final Color color;
+
+  /// 一覧から自分で選んだタスクを見ているか。選んでいないときは「いまのタスク」を
+  /// 映しているだけなので操作ボタンを出さない。表示が勝手に別のタスクへ移り、
+  /// 押すつもりのなかったものを完了にしてしまう事故を防ぐ。
+  final bool actionable;
+
+  /// 状態の変更をPCへ送る。反映はPCからのTODO再配信で返ってくる。
+  final void Function(Map<String, dynamic> message) onCommand;
 
   static String _fmtDateTime(DateTime? t) {
     if (t == null) return '—';
@@ -1678,10 +1898,99 @@ class _TaskDetailPanel extends StatelessWidget {
           if (task.completedAt != null)
             _metaRow('完了', _fmtDateTime(task.completedAt)),
           _metaRow('由来', _sourceLabel(task.source)),
+          const SizedBox(height: 12),
+          if (!actionable)
+            const Text(
+              '一覧からタスクを選ぶと、ここで完了や削除ができます',
+              style: TextStyle(color: Colors.white24, fontSize: 11),
+            )
+          else
+          // 由来を問わずここから状態を変えられる。Claude Code側には伝わらないが、
+          // 「終わったものが残り続ける」より一覧が正しいことを優先する。
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (task.status != 'completed')
+                _action('完了にする', color, () => _setStatus(task, 'completed')),
+              if (task.status == 'pending')
+                _action(
+                  'いま着手',
+                  _kMagenta,
+                  () => _setStatus(task, 'in_progress'),
+                ),
+              if (task.status == 'completed')
+                _action(
+                  '未完了に戻す',
+                  Colors.white54,
+                  () => _setStatus(task, 'pending'),
+                ),
+              _action(
+                '消す',
+                Colors.redAccent,
+                () => _confirmDelete(context, task),
+              ),
+            ],
+          ),
         ],
       ),
     );
   }
+
+  void _setStatus(TodoItem task, String status) =>
+      onCommand({'type': 'task_update', 'id': task.id, 'status': status});
+
+  /// 記憶を外に置く道具なので、消すのだけは一度止める。
+  Future<void> _confirmDelete(BuildContext context, TodoItem task) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14161C),
+        title: const Text(
+          'このTODOを消す？',
+          style: TextStyle(color: Colors.white, fontSize: 15),
+        ),
+        content: Text(
+          _TodoBoardState._label(task),
+          style: const TextStyle(color: Colors.white70, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            style: TextButton.styleFrom(foregroundColor: Colors.white38),
+            child: const Text('やめる'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.redAccent),
+            child: const Text('消す'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) _setStatus(task, 'deleted');
+  }
+
+  Widget _action(String label, Color c, VoidCallback onTap) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(7),
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      decoration: BoxDecoration(
+        color: c.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: c.withValues(alpha: 0.45)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: c,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    ),
+  );
 
   Widget _tag(String text, Color c, {bool filled = false}) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -1996,6 +2305,7 @@ class KanpanicchiPanel extends StatefulWidget {
     required this.onClick,
     required this.onShortcut,
     required this.onSendFile,
+    required this.onTaskCommand,
   });
 
   final ClaudeActivity? latestActivity;
@@ -2018,6 +2328,10 @@ class KanpanicchiPanel extends StatefulWidget {
 
   /// サーバー室からPCへファイルを送る（ファイル名, base64データ）。
   final void Function(String filename, String base64) onSendFile;
+
+  /// TODOの追加・編集をPCへ送る（`task_add` / `task_update`）。
+  /// 反映はPCからのTODO再配信を待つ（手元だけ書き換えて食い違うのを避ける）。
+  final void Function(Map<String, dynamic> message) onTaskCommand;
 
   @override
   State<KanpanicchiPanel> createState() => _KanpanicchiPanelState();
@@ -2771,6 +3085,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                             todos: widget.todos,
                             color: _status.color,
                             onSelect: _openTaskDetail,
+                            onCommand: widget.onTaskCommand,
                           ),
                           _CommentaryPanel(
                             comments: _commentLog,
@@ -2780,6 +3095,8 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                           _TaskDetailPanel(
                             task: _detailTask,
                             color: _status.color,
+                            onCommand: widget.onTaskCommand,
+                            actionable: _selectedTask != null,
                           ),
                         ],
                       ),

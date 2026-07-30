@@ -585,6 +585,102 @@ class WsServer
         }
     }
 
+    // ── スマホから直接タスクを足す・直す ─────────────────────────
+    // かんぱにっちは「記憶を外に置く」ための道具なので、Claude Code由来の作業だけでなく
+    // 日常のタスク（買い物・手続き・連絡など）も同じ一覧に入らないと用をなさない。
+    // 手動タスクのIDは m- 系で、Claude Code側の cc- 系とは衝突しない。
+
+    /// <summary>スマホからのタスク追加。作れたら配信用のTODO一覧を返す。</summary>
+    private List<object>? AddManualTask(string content, string description, string? priority)
+    {
+        content = content.Trim();
+        if (content.Length == 0) return null;
+
+        var id = TaskStateStore.NewManualTaskId();
+        // 件名にルールが効けばここで分類が決まる。日常のタスクは号機名を含まないことが
+        // 多く、その分はAIに回る（「買い物」「手続き」等の語彙はそのために用意してある）。
+        var (phase, rulePriority) = TaskClassifier.FromSubject(content);
+        var now = DateTime.UtcNow;
+
+        List<object> todos;
+        lock (_taskStateGate)
+        {
+            _taskOrder.Add(id);
+            _tasks[id] = new TaskRecord(
+                id, content, content, "pending", "manual", null, now, now, null,
+                description, phase ?? "", NormalizePriority(priority) ?? rulePriority ?? "");
+            todos = SnapshotTodosLocked();
+        }
+
+        if (phase is null)
+            QueueTaskClassification(id, content, description);
+
+        return todos;
+    }
+
+    /// <summary>
+    /// スマホからのタスク編集。由来は問わない（Claude Code由来のタスクも
+    /// スマホから完了にできる。あちら側には伝わらないが、一覧の信用を優先する）。
+    /// 何も変わらなければ null を返し、無駄な配信をしない。
+    /// </summary>
+    private List<object>? UpdateTaskFromPhone(
+        string id, string? status, string? content, string? description, string? priority)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return null;
+
+        lock (_taskStateGate)
+        {
+            if (!_tasks.TryGetValue(id, out var task)) return null;
+
+            var nextStatus = status is "pending" or "in_progress" or "completed" or "deleted"
+                ? status
+                : task.Status;
+            var nextContent = content is { Length: > 0 } ? content.Trim() : task.Content;
+            var nextDescription = description ?? task.Description;
+            var nextPriority = priority is null
+                ? task.Priority
+                : NormalizePriority(priority) ?? task.Priority;
+
+            if (nextStatus == task.Status
+                && nextContent == task.Content
+                && nextDescription == task.Description
+                && nextPriority == task.Priority)
+            {
+                return null;
+            }
+
+            // 完了した時刻は残す。未完了へ戻したときだけ消す。
+            var completedUtc = nextStatus switch
+            {
+                "completed" => task.CompletedUtc ?? DateTime.UtcNow,
+                "pending" or "in_progress" => null,
+                _ => task.CompletedUtc,
+            };
+
+            _tasks[id] = task with
+            {
+                Content = nextContent,
+                // 件名を変えたのにactiveFormが旧件名のままだと「いま」の表示がずれる。
+                ActiveForm = task.ActiveForm == task.Content ? nextContent : task.ActiveForm,
+                Description = nextDescription,
+                Priority = nextPriority,
+                Status = nextStatus,
+                UpdatedUtc = DateTime.UtcNow,
+                CompletedUtc = completedUtc,
+            };
+            return SnapshotTodosLocked();
+        }
+    }
+
+    /// <summary>P1/P2/P3 と空文字（未設定）だけを通す。それ以外は null。</summary>
+    private static string? NormalizePriority(string? value)
+    {
+        if (value is null) return null;
+        var trimmed = value.Trim().ToUpperInvariant();
+        if (trimmed.Length == 0) return "";
+        return trimmed is "P1" or "P2" or "P3" ? trimmed : null;
+    }
+
     private static string? GetInputString(JsonElement input, string name) =>
         input.TryGetProperty(name, out var value)
             && value.ValueKind == JsonValueKind.String
@@ -1856,6 +1952,34 @@ class WsServer
                     await SendJsonAsync(conn, new { type = "claude_todos", todos = rememberedTodos });
                 }
                 break;
+
+            case "task_add":
+            {
+                // スマホから足した日常のTODO。分類はPC側で付ける。
+                var added = AddManualTask(
+                    root.TryGetProperty("content", out var addContent)
+                        ? addContent.GetString() ?? "" : "",
+                    root.TryGetProperty("description", out var addDesc)
+                        ? addDesc.GetString() ?? "" : "",
+                    root.TryGetProperty("priority", out var addPrio)
+                        ? addPrio.GetString() : null);
+                if (added is not null) await PushClaudeTodosAsync(added);
+                break;
+            }
+
+            case "task_update":
+            {
+                var updated = UpdateTaskFromPhone(
+                    root.TryGetProperty("id", out var upId) ? upId.GetString() ?? "" : "",
+                    root.TryGetProperty("status", out var upStatus) ? upStatus.GetString() : null,
+                    root.TryGetProperty("content", out var upContent)
+                        ? upContent.GetString() : null,
+                    root.TryGetProperty("description", out var upDesc)
+                        ? upDesc.GetString() : null,
+                    root.TryGetProperty("priority", out var upPrio) ? upPrio.GetString() : null);
+                if (updated is not null) await PushClaudeTodosAsync(updated);
+                break;
+            }
 
             case "claude_knowledge_get":
                 // 資料室のナレッジ同期（claude_todos_getと同じスマホ主導pull方式）。
