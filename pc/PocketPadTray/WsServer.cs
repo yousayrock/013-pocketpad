@@ -46,7 +46,6 @@ class WsServer
     private System.Threading.Timer? _dailyCharacterTimer;
 
     /// <summary>認証済みのスマホ接続（1台想定）。ダッシュボードからの設定プッシュに使う。</summary>
-    private volatile Conn? _client;
 
     /// <summary>1接続分の状態。送信ロックはソケット単位に持つ。全接続で共有すると、
     /// 死んだ接続への送信詰まりがロックを握ったまま、再接続してきた新しいソケットへの
@@ -57,7 +56,67 @@ class WsServer
         public SemaphoreSlim SendLock { get; } = new(1, 1);
     }
 
-    public bool ClientConnected => _client is { Ws.State: WebSocketState.Open };
+    // ── 接続中の端末 ─────────────────────────────
+    // 複数台を同時に繋げる（スマホとタブレットで同じ世界を見る）。
+    // 以前は1台想定で「新しい接続が常に勝つ」作りだったため、
+    // 古い端末は黙って更新が止まり、表示だけが古いまま残っていた。
+    private readonly List<Conn> _clients = [];
+    private readonly object _clientsGate = new();
+
+    public bool ClientConnected
+    {
+        get
+        {
+            lock (_clientsGate)
+                return _clients.Any(c => c.Ws.State == WebSocketState.Open);
+        }
+    }
+
+    /// <summary>生きている接続の写しを返す。列挙中にロックを握らないための写し。</summary>
+    private List<Conn> LiveClients()
+    {
+        lock (_clientsGate)
+            return _clients.Where(c => c.Ws.State == WebSocketState.Open).ToList();
+    }
+
+    private void AddClient(Conn conn)
+    {
+        lock (_clientsGate)
+        {
+            if (!_clients.Contains(conn)) _clients.Add(conn);
+        }
+    }
+
+    private void RemoveClient(Conn conn)
+    {
+        lock (_clientsGate) _clients.Remove(conn);
+    }
+
+    /// <summary>接続中の全端末へ同じJSONを送る。1台でも届けば true。
+    /// 送信に失敗した接続はここで畳む（切断が受信ループより先に分かることがある）。</summary>
+    private async Task<bool> BroadcastJsonAsync(object payload) =>
+        await BroadcastTextAsync(JsonSerializer.Serialize(payload));
+
+    private async Task<bool> BroadcastTextAsync(string json)
+    {
+        var targets = LiveClients();
+        if (targets.Count == 0) return false;
+        var delivered = false;
+        foreach (var conn in targets)
+        {
+            try
+            {
+                await SendTextAsync(conn, json);
+                delivered = true;
+            }
+            catch (Exception)
+            {
+                // 1台の失敗で他の端末への配信を止めない。
+                RemoveClient(conn);
+            }
+        }
+        return delivered;
+    }
 
     /// <summary>TODO一覧。スマホ再起動/再接続直後にも最新のTODOをすぐ見せられるよう、
     /// authタイミングで自動配信する。</summary>
@@ -1126,92 +1185,36 @@ class WsServer
         return reader.ReadToEnd();
     }
 
-    /// <summary>接続中のスマホへ設定をプッシュ。未接続・送信失敗は false。</summary>
-    public async Task<bool> PushConfigAsync(string settingsJson)
-    {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
-        try
-        {
-            await SendTextAsync(conn, "{\"type\":\"config\",\"settings\":" + settingsJson + "}");
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
+    /// <summary>接続中の全端末へ設定をプッシュ。1台も届かなければ false。</summary>
+    public async Task<bool> PushConfigAsync(string settingsJson) =>
+        await BroadcastTextAsync("{\"type\":\"config\",\"settings\":" + settingsJson + "}");
 
-    /// <summary>接続中のスマホへClaude Code通知をプッシュ。未接続・送信失敗は false。</summary>
-    public async Task<bool> PushClaudeNotifyAsync(string ev, string message)
-    {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
-        try
-        {
-            await SendJsonAsync(conn, new { type = "claude_notify", @event = ev, message });
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
+    /// <summary>接続中の全端末へClaude Code通知をプッシュ。</summary>
+    public async Task<bool> PushClaudeNotifyAsync(string ev, string message) =>
+        await BroadcastJsonAsync(new { type = "claude_notify", @event = ev, message });
 
-    /// <summary>接続中のスマホへClaude Codeのツール活動をプッシュ。未接続・送信失敗は false。</summary>
-    public async Task<bool> PushClaudeActivityAsync(string tool, string detail)
-    {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
-        try
-        {
-            await SendJsonAsync(conn, new { type = "claude_activity", tool, detail });
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
+    /// <summary>接続中の全端末へClaude Codeのツール活動をプッシュ。</summary>
+    public async Task<bool> PushClaudeActivityAsync(string tool, string detail) =>
+        await BroadcastJsonAsync(new { type = "claude_activity", tool, detail });
 
-    /// <summary>接続中のスマホへClaude CodeのTODOリストをプッシュ。
+    /// <summary>接続中の全端末へClaude CodeのTODOリストをプッシュ。
     /// 次回接続時にも即座に見せられるよう、内容は_lastTodosに覚えておく。</summary>
     public async Task<bool> PushClaudeTodosAsync(List<object> todos)
     {
         _lastTodos = todos;
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
-        try
-        {
-            await SendJsonAsync(conn, new { type = "claude_todos", todos });
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
+        return await BroadcastJsonAsync(new { type = "claude_todos", todos });
     }
 
     /// <summary>接続中のスマホへHaiku実況コメントをプッシュ。</summary>
-    public async Task<bool> PushClaudeActivityCommentaryAsync(string text)
-    {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
-        try
-        {
-            await SendJsonAsync(conn, new { type = "claude_activity_comment", text });
-            return true;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
+    public async Task<bool> PushClaudeActivityCommentaryAsync(string text) =>
+        await BroadcastJsonAsync(new { type = "claude_activity_comment", text });
 
-    public async Task<bool> PushHaikuStatusAsync()
+    /// <summary>実況の状態を配る。targetを指定すると、その端末だけに返す
+    /// （haiku_status_get への応答。要求していない端末に送りつけない）。</summary>
+    public async Task<bool> PushHaikuStatusAsync() => await SendHaikuStatusAsync(null);
+
+    private async Task<bool> SendHaikuStatusAsync(Conn? target)
     {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
         try
         {
             var settings = HaikuSettingsStore.Load();
@@ -1222,15 +1225,15 @@ class WsServer
                     : string.IsNullOrEmpty(settings.ApiKey)
                         ? "実況が使えません（APIキーが未設定です）"
                         : null;
-            await SendJsonAsync(conn, new
+            var payload = new
             {
                 type = "haiku_status",
                 enabled = settings.Enabled,
                 paused = settings.Paused,
                 available = settings.Available,
                 reason,
-            });
-            return true;
+            };
+            return await DeliverAsync(target, payload);
         }
         catch (Exception ex)
         {
@@ -1239,10 +1242,26 @@ class WsServer
         }
     }
 
-    public async Task<bool> PushCommentaryLogAsync()
+    /// <summary>要求元だけに返すか、全端末へ配るかを一箇所で決める。
+    /// targetがnullなら同報。問い合わせへの応答は必ずtargetを渡すこと。</summary>
+    private async Task<bool> DeliverAsync(Conn? target, object payload)
     {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
+        if (target is null) return await BroadcastJsonAsync(payload);
+        if (target.Ws.State != WebSocketState.Open) return false;
+        try
+        {
+            await SendJsonAsync(target, payload);
+            return true;
+        }
+        catch (Exception)
+        {
+            RemoveClient(target);
+            return false;
+        }
+    }
+
+    private async Task<bool> SendCommentaryLogAsync(Conn? target)
+    {
         try
         {
             var entries = CommentaryStore.Load().Select(e => new
@@ -1250,8 +1269,7 @@ class WsServer
                 text = e.Text,
                 timestamp = e.Timestamp,
             });
-            await SendJsonAsync(conn, new { type = "claude_activity_comments", entries });
-            return true;
+            return await DeliverAsync(target, new { type = "claude_activity_comments", entries });
         }
         catch (Exception ex)
         {
@@ -1262,10 +1280,10 @@ class WsServer
 
     /// <summary>接続中のスマホへ資料室のナレッジ一覧をプッシュ。claude_todosと同じく毎回全件を
     /// 送る方式（差分管理をせず、常に%APPDATA%\PocketPad\knowledge.jsonの現在の全内容を渡す）。</summary>
-    public async Task<bool> PushClaudeKnowledgeAsync()
+    public async Task<bool> PushClaudeKnowledgeAsync() => await SendClaudeKnowledgeAsync(null);
+
+    private async Task<bool> SendClaudeKnowledgeAsync(Conn? target)
     {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
         try
         {
             var entries = KnowledgeStore.Load().Select(e => new
@@ -1277,8 +1295,7 @@ class WsServer
                 touchedFiles = e.TouchedFiles,
                 commitHash = e.CommitHash,
             });
-            await SendJsonAsync(conn, new { type = "claude_knowledge", entries });
-            return true;
+            return await DeliverAsync(target, new { type = "claude_knowledge", entries });
         }
         catch (Exception)
         {
@@ -1286,14 +1303,12 @@ class WsServer
         }
     }
 
-    public async Task<bool> PushDailyCharacterAsync()
+    private async Task<bool> SendDailyCharacterAsync(Conn? target)
     {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
         try
         {
             var c = DailyCharacterStore.LoadForDisplay();
-            await SendJsonAsync(conn, new
+            return await DeliverAsync(target, new
             {
                 type = "daily_character",
                 date = c.Date,
@@ -1307,7 +1322,6 @@ class WsServer
                 walk = c.Walk,
                 blink = c.Blink,
             });
-            return true;
         }
         catch (Exception)
         {
@@ -1315,10 +1329,8 @@ class WsServer
         }
     }
 
-    public async Task<bool> PushCharacterArchiveAsync(string month)
+    private async Task<bool> SendCharacterArchiveAsync(Conn? target, string month)
     {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
         try
         {
             // 一覧ではアニメーション等を送らず、月の遅延読込に必要な最小データだけにする。
@@ -1330,8 +1342,7 @@ class WsServer
                 stand = c.Stand,
                 palette = c.Palette,
             });
-            await SendJsonAsync(conn, new { type = "claude_archive", month, entries });
-            return true;
+            return await DeliverAsync(target, new { type = "claude_archive", month, entries });
         }
         catch (Exception ex)
         {
@@ -1340,10 +1351,8 @@ class WsServer
         }
     }
 
-    public async Task<bool> PushCharacterArchiveDetailAsync(string date)
+    private async Task<bool> SendCharacterArchiveDetailAsync(Conn? target, string date)
     {
-        var conn = _client;
-        if (conn is not { Ws.State: WebSocketState.Open }) return false;
         try
         {
             var found = CharacterArchiveStore.LoadDetail(date);
@@ -1365,8 +1374,7 @@ class WsServer
                 dot = found.Dot,
                 message = found.Message,
             };
-            await SendJsonAsync(conn, new { type = "claude_archive_detail", date, entry });
-            return true;
+            return await DeliverAsync(target, new { type = "claude_archive_detail", date, entry });
         }
         catch (Exception ex)
         {
@@ -1939,9 +1947,8 @@ class WsServer
         }
         finally
         {
-            // この接続が「現在の認証済みクライアント」なら参照を外す。
-            // 新しい接続に置き換わった後に旧接続が切れたケースでは消さない。
-            if (ReferenceEquals(_client, conn)) _client = null;
+            // 切れた接続をプッシュ先から外す。他の端末の接続には影響しない。
+            RemoveClient(conn);
         }
     }
 
@@ -1994,7 +2001,7 @@ class WsServer
             if (root.TryGetProperty("token", out var t) && t.GetString() == PairingToken)
             {
                 await SendJsonAsync(conn, new { type = "auth_ok", device_secret = RandomNumberGenerator.GetHexString(64, lowercase: true) });
-                _client = conn; // 設定プッシュ用に保持（1台想定、新しい接続が常に勝つ）
+                AddClient(conn); // 以降のプッシュ先に加える（複数台の同時接続を許す）
                 ClientAuthenticated?.Invoke();
                 return true;
             }
@@ -2129,30 +2136,35 @@ class WsServer
                 break;
             }
 
+            // ここから下の *_get はすべて「要求してきた端末」へ返す。
+            // 以前は保持していた1台へ返していたため、複数台つないでいると
+            // 図鑑やキャラを開いた端末ではなく別の端末に応答が届いていた。
             case "claude_knowledge_get":
                 // 資料室のナレッジ同期（claude_todos_getと同じスマホ主導pull方式）。
-                await PushClaudeKnowledgeAsync();
+                await SendClaudeKnowledgeAsync(conn);
                 break;
 
             case "haiku_status_get":
-                await PushHaikuStatusAsync();
+                await SendHaikuStatusAsync(conn);
                 break;
 
             case "claude_activity_comments_get":
-                await PushCommentaryLogAsync();
+                await SendCommentaryLogAsync(conn);
                 break;
 
             case "daily_character_get":
-                await PushDailyCharacterAsync();
+                await SendDailyCharacterAsync(conn);
                 break;
 
             case "claude_archive_get":
-                await PushCharacterArchiveAsync(
+                await SendCharacterArchiveAsync(
+                    conn,
                     root.TryGetProperty("month", out var monthEl) ? monthEl.GetString() ?? "" : "");
                 break;
 
             case "claude_archive_detail_get":
-                await PushCharacterArchiveDetailAsync(
+                await SendCharacterArchiveDetailAsync(
+                    conn,
                     root.TryGetProperty("date", out var dateEl) ? dateEl.GetString() ?? "" : "");
                 break;
 
