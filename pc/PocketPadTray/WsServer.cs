@@ -579,7 +579,7 @@ class WsServer
     private const int MaxPendingActiveForms = 32;
 
     private static string PendingActiveFormKey(string sessionId, string subject) =>
-        sessionId + " " + subject;
+        sessionId + "\0" + subject;
 
     private void StashPendingActiveForm(string sessionId, string subject, string activeForm)
     {
