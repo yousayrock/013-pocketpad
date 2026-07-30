@@ -713,6 +713,32 @@ class _TrackpadScreenState extends State<TrackpadScreen>
   ClaudeActivity? _lastClaudeActivity;
   ClaudeNotifyEvent? _lastClaudeNotifyEvent;
   List<TodoItem> _lastTodos = [];
+
+  /// 引っ張って更新の待ち合わせ。次の claude_todos を受けたら完了する。
+  Completer<void>? _todoRefresh;
+
+  /// TODO一覧を引っ張って更新する。
+  ///
+  /// PCのpushが落ちても（再接続・トレイ再起動・push漏れ）、手で取り直せる。
+  /// PC側は覚えているキャッシュではなくストアから作り直して返すので、
+  /// トレイ側が更新を忘れていてもここで発火する二重チェックになっている。
+  Future<void> _refreshTodos() async {
+    final pending = _todoRefresh;
+    if (pending != null && !pending.isCompleted) return pending.future;
+
+    final completer = Completer<void>();
+    _todoRefresh = completer;
+    _sendJson({'type': 'claude_todos_get'});
+    try {
+      // トレイが落ちていると応答が来ない。永久に回り続けるよりは
+      // 止まって「変わらなかった」と見せるほうがいい。
+      await completer.future.timeout(const Duration(seconds: 3));
+    } on TimeoutException {
+      // 握りつぶす。回転が止まって一覧がそのまま残るのが正しい振る舞い。
+    } finally {
+      if (identical(_todoRefresh, completer)) _todoRefresh = null;
+    }
+  }
   ActivityComment? _lastActivityComment;
   List<ActivityComment> _commentHistory = [];
   HaikuStatus? _haikuStatus;
@@ -857,6 +883,11 @@ class _TrackpadScreenState extends State<TrackpadScreen>
             TodoItem.fromJson((t as Map).cast<String, dynamic>()),
         ],
       );
+      // 引っ張って更新が待っていれば、ここで回転を止める。
+      // 固定時間で止めると「更新できた」と嘘をつくことになる。
+      if (_todoRefresh != null && !_todoRefresh!.isCompleted) {
+        _todoRefresh!.complete();
+      }
     } else if (j['type'] == 'claude_knowledge') {
       // claude_todosと同じく、PCから常に全件が送られてくる（差分管理はしない）。
       final raw = (j['entries'] as List?) ?? const [];
@@ -1251,6 +1282,7 @@ class _TrackpadScreenState extends State<TrackpadScreen>
             'data': base64,
           }),
           onTaskCommand: _sendJson,
+          onRefreshTodos: _refreshTodos,
         );
       case 'youtube':
         return YoutubePanel(

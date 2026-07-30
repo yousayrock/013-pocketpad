@@ -346,9 +346,45 @@ Map<String, Color> _archivePalette(dynamic value) {
   return result.isEmpty ? _defaultSpritePalette : result;
 }
 
+/// 世界のスロット。**表示名ではなくこのIDで区別する。**
+///
+/// スキンは複数のスロットを同じ名前にまとめられる（天国スキンでは
+/// 「調べる」と「振り返る」がどちらも神殿になる）。表示名をキーに使うと
+/// そこで混ざるので、必ずIDで持つ（docs/VISION.md 2.6）。
+enum _SlotId {
+  /// 何もしていないときの居場所。部屋カードは持たない。
+  idle,
+
+  /// ツールの対応表に無い作業をしているとき。部屋カードは持たない。
+  working,
+
+  /// 作る（開発デスク → 家 / 喫茶店 / 工房 …）
+  making,
+
+  /// 動かす（サーバー室 → 厨房 / 機械室 / 畑 …）
+  running,
+
+  /// 調べる（資料室 → 図書館 / 書斎 / 学校 …）
+  seeking,
+
+  /// 振り返る（図鑑室 → 日報 / アルバム / 記念館 …）
+  looking,
+}
+
 /// オフィス内の「持ち場」。キャラクターがこの位置(Alignment)へ移動する。
+///
+/// `roomName` は**表示名**であって識別子ではない。スキンで差し替わる前提の値なので、
+/// 記録や比較には必ず `id` を使うこと。
 class _Zone {
-  const _Zone(this.align, this.propIcon, this.verb, this.roomName, this.color);
+  const _Zone(
+    this.id,
+    this.align,
+    this.propIcon,
+    this.verb,
+    this.roomName,
+    this.color,
+  );
+  final _SlotId id;
   final Alignment align;
   final IconData propIcon;
   final String verb;
@@ -359,6 +395,7 @@ class _Zone {
 }
 
 const _zoneIdle = _Zone(
+  _SlotId.idle,
   Alignment.center,
   Icons.chair_alt,
   '待機中',
@@ -366,6 +403,7 @@ const _zoneIdle = _Zone(
   Colors.white38,
 );
 const _zoneEditing = _Zone(
+  _SlotId.making,
   Alignment(-0.7, -0.8),
   Icons.desktop_windows,
   '編集中',
@@ -373,6 +411,7 @@ const _zoneEditing = _Zone(
   Color(0xFF29B6F6),
 );
 const _zoneCommand = _Zone(
+  _SlotId.running,
   Alignment(0.7, -0.8),
   Icons.terminal,
   'コマンド実行中',
@@ -380,6 +419,7 @@ const _zoneCommand = _Zone(
   Color(0xFFB388FF),
 );
 const _zoneSearching = _Zone(
+  _SlotId.seeking,
   Alignment(-0.7, 0.8),
   Icons.menu_book,
   '調査中',
@@ -387,6 +427,7 @@ const _zoneSearching = _Zone(
   Color(0xFFFFC24B),
 );
 const _zoneDelegating = _Zone(
+  _SlotId.looking,
   Alignment(0.7, 0.8),
   Icons.collections_bookmark,
   '閲覧用',
@@ -407,6 +448,7 @@ const _zones = <String, _Zone>{
   'WebFetch': _zoneSearching,
 };
 const _zoneWorking = _Zone(
+  _SlotId.working,
   Alignment.center,
   Icons.smart_toy,
   '作業中',
@@ -415,6 +457,15 @@ const _zoneWorking = _Zone(
 );
 
 _Zone _zoneFor(String tool) => _zones[tool] ?? _zoneWorking;
+
+/// 画面に部屋カードとして並ぶスロット。
+/// 将来ここが可変（1〜5部屋）になる。今は今までと同じ4部屋を返すだけ。
+const _visibleZones = <_Zone>[
+  _zoneEditing,
+  _zoneCommand,
+  _zoneSearching,
+  _zoneDelegating,
+];
 
 /// "HH:mm:ss"形式の時刻表示。実況ログ・部屋詳細・資料室で共通に使う。
 /// PC側は DateTimeOffset.Now.ToString("O") でオフセット付きの文字列を送ってくる。
@@ -1048,14 +1099,15 @@ class _StatsHeader extends StatelessWidget {
     required this.name,
     required this.character,
     required this.color,
-    required this.onNameTap,
     required this.onThemeTap,
   });
 
   final String name;
   final DailyCharacter character;
   final Color color;
-  final VoidCallback onNameTap;
+
+  /// ヘッダーのどこを押しても「今日の自分」のシートを開く。
+  /// 改名もここから辿るので、鉛筆アイコンは持たない。
   final VoidCallback onThemeTap;
 
   @override
@@ -1074,8 +1126,9 @@ class _StatsHeader extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(12, 10, 44, 8),
       child: Row(
         children: [
-          // ヘッダーのテーマ・理由は1行に省略されるため、アイコンからも
-          // 全文を読めるようにする（理由行のタップと同じ詳細シートを開く）。
+          // アイコンをタップすると「今日の自分」のシートが開き、そこから
+          // 図鑑と改名へ分岐する（docs/VISION.md 2.7）。名前・理由の行も
+          // 同じシートへ繋いであるので、ヘッダー内はどこを押しても迷わない。
           GestureDetector(
             onTap: onThemeTap,
             child: Container(
@@ -1102,28 +1155,16 @@ class _StatsHeader extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 GestureDetector(
-                  onTap: onNameTap,
-                  child: Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          '$name / ${character.theme}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: color,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Icon(
-                        Icons.edit,
-                        color: color.withValues(alpha: 0.6),
-                        size: 12,
-                      ),
-                    ],
+                  onTap: onThemeTap,
+                  child: Text(
+                    '$name / ${character.theme}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: color,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
                   ),
                 ),
                 const SizedBox(height: 5),
@@ -1151,10 +1192,14 @@ class _TodoBoard extends StatefulWidget {
     required this.color,
     required this.onSelect,
     required this.onCommand,
+    required this.onRefresh,
   });
 
   final List<TodoItem> todos;
   final Color color;
+
+  /// 下に引っ張ったときにPCから取り直す。
+  final Future<void> Function() onRefresh;
 
   /// 行をタップしたときに親へ選択を伝える。親は詳細ページへ切り替える。
   final ValueChanged<TodoItem> onSelect;
@@ -1226,21 +1271,29 @@ class _TodoBoardState extends State<_TodoBoard> {
   Widget build(BuildContext context) {
     final tasks = widget.todos;
     if (tasks.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+      // 一覧が空のときこそ引っ張って取り直したいので、ここも包む
+      // （PCのpushを取りこぼしただけで空に見えている場合がある）。
+      return RefreshIndicator(
+        onRefresh: widget.onRefresh,
+        color: widget.color,
+        backgroundColor: const Color(0xFF0A1020),
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
           children: [
+            const SizedBox(height: 60),
             const Text(
               'Claude CodeがTODOを作ると\nここに一覧が表示されます',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.white24, fontSize: 11),
             ),
             const SizedBox(height: 10),
-            TextButton.icon(
-              onPressed: _openAddSheet,
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text('自分で足す', style: TextStyle(fontSize: 12)),
-              style: TextButton.styleFrom(foregroundColor: widget.color),
+            Center(
+              child: TextButton.icon(
+                onPressed: _openAddSheet,
+                icon: const Icon(Icons.add, size: 16),
+                label: const Text('自分で足す', style: TextStyle(fontSize: 12)),
+                style: TextButton.styleFrom(foregroundColor: widget.color),
+              ),
             ),
           ],
         ),
@@ -1370,22 +1423,33 @@ class _TodoBoardState extends State<_TodoBoard> {
         ],
         const Divider(height: 4, thickness: 1, color: Colors.white10),
         Expanded(
-          child: ListView(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-            children: [
-              for (final entry in grouped.entries) ...[
-                _phaseHeader(entry.key, entry.value, activeTask),
-                if (_expanded.contains(entry.key))
-                  for (final task in entry.value) _taskRow(task, active: false),
+          // 下に引っ張るとPCから取り直す。横スワイプ（ページ切り替え）とは
+          // 軸が違うので衝突しない。
+          child: RefreshIndicator(
+            onRefresh: widget.onRefresh,
+            color: widget.color,
+            backgroundColor: const Color(0xFF0A1020),
+            child: ListView(
+              // 中身が短くても引っ張れるようにする。これが無いと一覧が
+              // 画面に収まっているときだけ更新できない、という罠になる。
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+              children: [
+                for (final entry in grouped.entries) ...[
+                  _phaseHeader(entry.key, entry.value, activeTask),
+                  if (_expanded.contains(entry.key))
+                    for (final task in entry.value)
+                      _taskRow(task, active: false),
+                ],
+                if (completed.isNotEmpty) ...[
+                  _completedHeader(completed.length),
+                  // 一日ぶん働いた証拠が分野ごとに見えるようにする。
+                  _completedByPhase(completed),
+                  if (!_completedCollapsed)
+                    for (final task in completed) _completedTaskRow(task),
+                ],
               ],
-              if (completed.isNotEmpty) ...[
-                _completedHeader(completed.length),
-                // 一日ぶん働いた証拠が分野ごとに見えるようにする。
-                _completedByPhase(completed),
-                if (!_completedCollapsed)
-                  for (final task in completed) _completedTaskRow(task),
-              ],
-            ],
+            ),
           ),
         ),
       ],
@@ -2314,6 +2378,7 @@ class KanpanicchiPanel extends StatefulWidget {
     required this.onShortcut,
     required this.onSendFile,
     required this.onTaskCommand,
+    required this.onRefreshTodos,
   });
 
   final ClaudeActivity? latestActivity;
@@ -2341,6 +2406,9 @@ class KanpanicchiPanel extends StatefulWidget {
   /// 反映はPCからのTODO再配信を待つ（手元だけ書き換えて食い違うのを避ける）。
   final void Function(Map<String, dynamic> message) onTaskCommand;
 
+  /// TODO一覧を引っ張って更新する。PCのpushが落ちても手で取り直せるようにする。
+  final Future<void> Function() onRefreshTodos;
+
   @override
   State<KanpanicchiPanel> createState() => _KanpanicchiPanelState();
 }
@@ -2357,7 +2425,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     label: '待機中',
   );
   // 部屋タップで詳細を見せるための、部屋ごとの直近の活動（生のツール/対象/時刻）。
-  final Map<String, ClaudeActivity> _lastActivityByRoom = {};
+  /// キーは表示名ではなくスロットID。スキンで名前が重複しても混ざらない
+  /// （以前は部屋名をキーにしていて、待機中と作業中が「休憩スペース」で
+  /// 衝突していた）。
+  final Map<_SlotId, ClaudeActivity> _lastActivityByRoom = {};
   // 直近の活動の一言。アイドル判定（30秒操作なし）になった時、ただ「待機中」に
   // するのではなく「ビルド中でしばらく時間がかかっている」等、何を待っているか
   // 分かるようにするために使う。ターン完了(stop)でクリアする。
@@ -2420,13 +2491,16 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xFF0A1020),
         title: const Text('名前を変更', style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLength: 4,
-          style: const TextStyle(color: Colors.white),
-          decoration: const InputDecoration(hintText: kCharacterName),
-          onSubmitted: (v) => Navigator.pop(context, v),
+        // キーボードが出ると縦が足りずはみ出すので、内容だけスクロールさせる。
+        content: SingleChildScrollView(
+          child: TextField(
+            controller: controller,
+            autofocus: true,
+            maxLength: 4,
+            style: const TextStyle(color: Colors.white),
+            decoration: const InputDecoration(hintText: kCharacterName),
+            onSubmitted: (v) => Navigator.pop(context, v),
+          ),
         ),
         actions: [
           TextButton(
@@ -2464,19 +2538,13 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   /// 部屋タップ時、その部屋での直近の活動を詳しく見せる（メインの一言は
   /// あえて簡略化しているため、気になる人向けに生のツール名/対象を出す）。
   void _showRoomDetail(_Zone zone) {
-    if (zone == _zoneDelegating) {
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (context) => _ArchivePage(
-            color: zone.color,
-            loadMonth: widget.loadArchiveMonth,
-            loadDetail: widget.loadArchiveDetail,
-          ),
-        ),
-      );
+    // 比較はIDで行う。スキンで名前や色が差し替わっても、どのスロットかは変わらない。
+    if (zone.id == _SlotId.looking) {
+      // 図鑑はキャラアイコンからも開ける。入口は2つでも遷移先は1つに保つ。
+      _showArchive();
       return;
     }
-    final activity = _lastActivityByRoom[zone.roomName];
+    final activity = _lastActivityByRoom[zone.id];
     showModalBottomSheet(
       context: context,
       // 内容の高さぶんしか取らないと画面最下部に張り付いて押しにくいので、
@@ -2568,7 +2636,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                       ),
                     ),
                   ],
-                  if (zone == _zoneCommand) ...[
+                  if (zone.id == _SlotId.running) ...[
                     const SizedBox(height: 18),
                     const Divider(color: Colors.white12),
                     const SizedBox(height: 6),
@@ -2590,7 +2658,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                       ),
                     ),
                   ],
-                  if (zone == _zoneSearching) ...[
+                  if (zone.id == _SlotId.seeking) ...[
                     const SizedBox(height: 18),
                     const Divider(color: Colors.white12),
                     const SizedBox(height: 6),
@@ -2621,6 +2689,11 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     );
   }
 
+  /// 「今日の自分」シート。ヘッダーのキャラアイコンから開く。
+  ///
+  /// アイコンは今日の自分、図鑑は過去の自分の集まり、名前は自分の呼び名——
+  /// すべて自分に関することなので、自分をタップして開く形に集約している
+  /// （docs/VISION.md 2.7）。鉛筆アイコンはこれに伴って廃止した。
   void _showThemeDetail() {
     final character = widget.character;
     showModalBottomSheet(
@@ -2629,31 +2702,145 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (context) => Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              character.theme,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _status.color.withValues(alpha: 0.18),
+                      border: Border.all(
+                        color: _status.color.withValues(alpha: 0.5),
+                      ),
+                    ),
+                    child: FittedBox(
+                      child: PixelSprite(
+                        rows: character.stand,
+                        glow: _status.color,
+                        palette: character.palette,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _displayName,
+                          style: TextStyle(
+                            color: _status.color,
+                            fontSize: 17,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        if (character.theme.isNotEmpty)
+                          Text(
+                            character.theme,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(height: 12),
+              if (character.reason.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                Text(
+                  character.reason,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    height: 1.6,
+                  ),
+                ),
+              ],
+              if (character.date.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  character.date,
+                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                ),
+              ],
+              const SizedBox(height: 18),
+              const Divider(color: Colors.white12, height: 1),
+              const SizedBox(height: 6),
+              _selfAction(
+                icon: Icons.collections_bookmark,
+                label: '図鑑を見る',
+                caption: 'これまでの自分',
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _showArchive();
+                },
+              ),
+              _selfAction(
+                icon: Icons.edit,
+                label: '名前を変える',
+                caption: _displayName,
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _renameCharacter();
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _selfAction({
+    required IconData icon,
+    required String label,
+    required String caption,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Row(
+          children: [
+            Icon(icon, color: _status.color, size: 19),
+            const SizedBox(width: 12),
             Text(
-              character.reason,
-              style: const TextStyle(color: Colors.white70, fontSize: 14),
+              label,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
             ),
-            const SizedBox(height: 12),
+            const Spacer(),
             Text(
-              character.date,
-              style: const TextStyle(color: Colors.white38, fontSize: 12),
+              caption,
+              style: const TextStyle(color: Colors.white38, fontSize: 11),
             ),
+            const SizedBox(width: 6),
+            const Icon(Icons.chevron_right, color: Colors.white24, size: 18),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 図鑑（これまでの自分）を開く。部屋からもここからも同じページを使う。
+  void _showArchive() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => _ArchivePage(
+          color: _zoneDelegating.color,
+          loadMonth: widget.loadArchiveMonth,
+          loadDetail: widget.loadArchiveDetail,
         ),
       ),
     );
@@ -2773,7 +2960,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     final zone = _zoneFor(a.tool);
     final label = _activitySentence(a.tool, a.detail);
     _moveTo(zone, zone.color, label);
-    _lastActivityByRoom[zone.roomName] = a;
+    _lastActivityByRoom[zone.id] = a;
     _lastActivityLabel = label;
     _doneRevertTimer?.cancel();
     _armIdleTimer();
@@ -2947,7 +3134,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                         name: _displayName,
                                         character: character,
                                         color: _status.color,
-                                        onNameTap: _renameCharacter,
                                         onThemeTap: _showThemeDetail,
                                       ),
                                       Expanded(
@@ -2963,13 +3149,10 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                                 ),
                                               ),
                                             ),
-                                            // 各持ち場の部屋カード
-                                            for (final z in {
-                                              _zoneEditing,
-                                              _zoneCommand,
-                                              _zoneSearching,
-                                              _zoneDelegating,
-                                            })
+                                            // 各持ち場の部屋カード。
+                                            // idle と working は居場所であって
+                                            // 部屋ではないので、ここには並ばない。
+                                            for (final z in _visibleZones)
                                               Align(
                                                 alignment: z.align,
                                                 child: _RoomCard(
@@ -3095,6 +3278,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                             color: _status.color,
                             onSelect: _openTaskDetail,
                             onCommand: widget.onTaskCommand,
+                            onRefresh: widget.onRefreshTodos,
                           ),
                           _CommentaryPanel(
                             comments: _commentLog,

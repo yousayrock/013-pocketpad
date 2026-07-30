@@ -2079,14 +2079,27 @@ class WsServer
                 break;
 
             case "claude_todos_get":
+            {
                 // かんぱにっちのTODO同期（スマホ主導）。auth直後のPC自発pushだと、
                 // アプリ側がまだstreamのlisten登録を終える前に届いて取りこぼすため、
                 // config_getと同じく「アプリがlisten登録後に取りに来る」方式にする。
-                if (_lastTodos is { } rememberedTodos)
+                //
+                // 覚えている _lastTodos をそのまま返すのではなく、ストアから作り直す。
+                // pushを取りこぼしただけならキャッシュで足りるが、トレイ自身の
+                // 持ち物が古いときはキャッシュも古いままになる。ここで再導出すれば
+                // スマホの引っ張って更新が「トレイ側の更新漏れも発火させる」
+                // 二重チェックとして働く。
+                List<object> fresh;
+                lock (_taskStateGate)
                 {
-                    await SendJsonAsync(conn, new { type = "claude_todos", todos = rememberedTodos });
+                    // 書き込みはしない（更新は読み取りのみ）。Snapshot版は
+                    // ファイル保存まで走るので、ここでは Build 版を使う。
+                    fresh = BuildTodosLocked();
                 }
+                _lastTodos = fresh;
+                await SendJsonAsync(conn, new { type = "claude_todos", todos = fresh });
                 break;
+            }
 
             case "task_add":
             {
