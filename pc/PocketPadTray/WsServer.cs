@@ -201,6 +201,39 @@ class WsServer
             }
         });
 
+        // Claude Codeが新しいセッションで前の続きを拾うための口。
+        // 一覧に説明文は載せない。毎セッション読み込む前提なので、
+        // 未完了11件ぶんの本文まで積むとトークンが無視できなくなる。
+        // 中身は着手するものだけ /api/tasks/{id} で取りに来る。
+        app.MapGet("/api/tasks", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            var phase = ctx.Request.Query["phase"].ToString();
+            ctx.Response.ContentType = "application/json; charset=utf-8";
+            await ctx.Response.WriteAsync(JsonSerializer.Serialize(ListOpenTasks(phase)));
+        });
+
+        app.MapGet("/api/tasks/{id}", async ctx =>
+        {
+            if (Reject(ctx)) return;
+            var task = FindTask(ctx.Request.RouteValues["id"] as string ?? "");
+            if (task is null) { ctx.Response.StatusCode = 404; return; }
+            ctx.Response.ContentType = "application/json; charset=utf-8";
+            await ctx.Response.WriteAsync(JsonSerializer.Serialize(new
+            {
+                id = task.Id,
+                content = task.Content,
+                activeForm = task.ActiveForm,
+                description = task.Description,
+                phase = task.Phase,
+                priority = task.Priority,
+                status = task.Status,
+                source = task.Source,
+                createdUtc = task.CreatedUtc,
+                updatedUtc = task.UpdatedUtc,
+            }));
+        });
+
         app.MapGet("/api/status", async ctx =>
         {
             if (Reject(ctx)) return;
@@ -428,15 +461,24 @@ class WsServer
                 var activeForm = TakePendingActiveFormLocked(sessionId!, subject)
                     ?? recoveredActiveForm
                     ?? subject;
-                // ルールで拾えた分はここで決まる。決まらなかったものは後でAIに回す。
-                var (phase, priority) = TaskClassifier.FromSubject(subject);
-                needsClassification = phase is null;
-                if (!_tasks.ContainsKey(globalId))
-                    _taskOrder.Add(globalId);
-                _tasks[globalId] = new TaskRecord(
-                    globalId, subject, activeForm, "pending",
-                    "claude-code", sessionId, now, now, null, description,
-                    phase ?? "", priority ?? "");
+                // セッションが変わっても同じ作業を続けられるよう、まず引き継ぎを試す。
+                if (AdoptExistingTaskLocked(globalId, sessionId!, subject, description, activeForm, now))
+                {
+                    // 引き継いだ相手が未分類のままなら、ここで分類に回す。
+                    needsClassification = _tasks[globalId].Phase.Length == 0;
+                }
+                else
+                {
+                    // ルールで拾えた分はここで決まる。決まらなかったものは後でAIに回す。
+                    var (phase, priority) = TaskClassifier.FromSubject(subject);
+                    needsClassification = phase is null;
+                    if (!_tasks.ContainsKey(globalId))
+                        _taskOrder.Add(globalId);
+                    _tasks[globalId] = new TaskRecord(
+                        globalId, subject, activeForm, "pending",
+                        "claude-code", sessionId, now, now, null, description,
+                        phase ?? "", priority ?? "");
+                }
             }
             else if (_tasks.TryGetValue(globalId, out var task))
             {
@@ -461,6 +503,59 @@ class WsServer
             QueueTaskClassification(globalId, subject, description);
 
         return todos;
+    }
+
+    /// <summary>
+    /// 新しいセッションが作ったタスクを、件名が同じ既存のレコードへ結び直す。
+    ///
+    /// Claude Codeのセッションが変わると、ストアのキー cc-{sessionId}-{taskId} が
+    /// 変わってしまい、前のセッションのタスクを完了にも削除にもできなくなる。
+    /// ユウセイさんから見れば作業は続いているのに、道具の側だけが切れている状態なので、
+    /// 同じ件名で作り直されたら「それは前と同じ作業だ」と見なして引き継ぐ。
+    ///
+    /// 引き継げたら true。_taskStateGateを保持した状態で呼ぶこと。
+    /// </summary>
+    private bool AdoptExistingTaskLocked(
+        string globalId, string sessionId, string subject,
+        string description, string activeForm, DateTime now)
+    {
+        var wanted = subject.Trim();
+        if (wanted.Length == 0) return false;
+
+        // 未完了のものだけが対象。完了・削除済みと同じ件名を作ったのなら、
+        // それは「もう一度やる」という別の仕事なので新しいレコードにする。
+        string? matchId = null;
+        foreach (var id in _taskOrder)
+        {
+            if (!_tasks.TryGetValue(id, out var candidate)) continue;
+            if (candidate.Status is "completed" or "deleted") continue;
+            if (!string.Equals(candidate.Content.Trim(), wanted, StringComparison.Ordinal)) continue;
+            // 2件以上あったら諦める。取り違えて別タスクへ結ぶ方が害が大きい。
+            if (matchId is not null) return false;
+            matchId = id;
+        }
+
+        if (matchId is null || matchId == globalId) return false;
+
+        var existing = _tasks[matchId];
+        _tasks.Remove(matchId);
+        // 並び順は元の位置を守る。末尾へ動かすと一覧での居場所が変わってしまう。
+        var slot = _taskOrder.IndexOf(matchId);
+        if (slot >= 0) _taskOrder[slot] = globalId; else _taskOrder.Add(globalId);
+
+        _tasks[globalId] = existing with
+        {
+            Id = globalId,
+            // 以降の完了・削除が効くように、持ち主を新しいセッションへ移す。
+            SessionId = sessionId,
+            Source = "claude-code",
+            // いつから抱えている作業かが消えるのが一番惜しいので、作成時刻は残す。
+            UpdatedUtc = now,
+            // 新しく届いた方が中身を持っていれば、そちらを採る。
+            Description = description.Length > 0 ? description : existing.Description,
+            ActiveForm = activeForm.Length > 0 ? activeForm : existing.ActiveForm,
+        };
+        return true;
     }
 
     /// <summary>
@@ -939,6 +1034,46 @@ class WsServer
         var result = BuildTodosLocked();
         PersistTaskStateLocked();
         return result;
+    }
+
+    /// <summary>
+    /// 未完了のタスクを一覧で返す。phaseを渡すとその分野だけに絞る
+    /// （016のセッションには016の話だけを渡したいため）。空なら全件。
+    /// </summary>
+    private List<object> ListOpenTasks(string? phase)
+    {
+        var wanted = phase?.Trim();
+        var result = new List<object>();
+        lock (_taskStateGate)
+        {
+            // 並び順はかんぱにっちの一覧と揃える。見え方が二通りあると混乱する。
+            foreach (var id in _taskOrder)
+            {
+                if (!_tasks.TryGetValue(id, out var task)) continue;
+                if (task.Status is "completed" or "deleted") continue;
+                if (!string.IsNullOrEmpty(wanted)
+                    && !string.Equals(task.Phase, wanted, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                result.Add(new
+                {
+                    id = task.Id,
+                    content = task.Content,
+                    activeForm = task.ActiveForm,
+                    phase = task.Phase,
+                    priority = task.Priority,
+                    status = task.Status,
+                });
+            }
+        }
+        return result;
+    }
+
+    private TaskRecord? FindTask(string id)
+    {
+        lock (_taskStateGate)
+            return _tasks.TryGetValue(id, out var task) ? task : null;
     }
 
     /// <summary>_taskStateGateを保持した状態で呼ぶこと。由来を問わず全TODOを返す。</summary>

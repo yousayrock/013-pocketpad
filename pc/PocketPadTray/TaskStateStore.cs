@@ -255,7 +255,9 @@ static class TaskStateStore
             || !TryGetString(root, "content", out var content)
             || !TryGetString(root, "activeForm", out var activeForm)
             || !TryGetString(root, "status", out var status)
-            || status is not ("pending" or "in_progress" or "completed")
+            // deletedも読む。書き込み側はレコードを消さずに status を deleted にして
+            // 残しているので、ここで弾くと再起動のたびに本当に消えてしまう。
+            || status is not ("pending" or "in_progress" or "completed" or "deleted")
             || !TryGetString(root, "source", out var source)
             || source is not ("claude-code" or "manual" or "gadget")
             || !TryGetUtcDateTime(root, "createdUtc", out var createdUtc)
