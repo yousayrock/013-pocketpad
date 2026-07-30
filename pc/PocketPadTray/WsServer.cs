@@ -544,8 +544,9 @@ class WsServer
         if (tool != "TaskUpdate")
             return null;
 
+        // 削除も TaskUpdate の status として届く（TaskDeleted専用のフックは無い）。
         var status = GetInputString(input, "status");
-        if (status is not "in_progress" && activeForm is null)
+        if (status is not ("in_progress" or "deleted") && activeForm is null)
             return null;
 
         var taskId = input.TryGetProperty("taskId", out var idEl)
@@ -566,7 +567,8 @@ class WsServer
             if (!_tasks.TryGetValue(globalId, out var task))
                 return null;
 
-            var nextStatus = status is "in_progress" ? "in_progress" : task.Status;
+            // 削除はレコードを消さずに status を変える。一覧からは外れるが記録は残る。
+            var nextStatus = status is "in_progress" or "deleted" ? status : task.Status;
             var nextActiveForm = activeForm ?? task.ActiveForm;
             if (nextStatus == task.Status && nextActiveForm == task.ActiveForm)
                 return SnapshotTodosLocked();
@@ -772,6 +774,8 @@ class WsServer
         foreach (var id in _taskOrder)
         {
             if (!_tasks.TryGetValue(id, out var task)) continue;
+            // 意図的に消したものは見せない。レコード自体はファイルに残す。
+            if (task.Status == "deleted") continue;
             result.Add(new
             {
                 id = task.Id,
