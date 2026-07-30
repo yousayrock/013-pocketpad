@@ -665,12 +665,17 @@ class WsServer
         var settings = HaikuSettingsStore.Load();
         if (!settings.Available) return null;
 
-        var vocabulary = string.Join(" / ", TaskClassifier.Vocabulary);
+        // 語彙は名前だけでなく「その分野が何であるか」も渡す。
+        // 裸のリストだけだと号機番号の無いタスクを取り違える。
+        var guide = string.Join(
+            "\n",
+            TaskClassifier.VocabularyGuide.Select(x => $"- {x.Phase}: {x.Description}"));
         var system =
-            "あなたはタスクを分類する係です。渡されたタスクがどの分野のものかを判断し、"
-            + $"次の候補のうち最も近いものを1つだけ選んでください。\n候補: {vocabulary}\n"
-            + "候補の言葉をそのまま、余計な記号や説明を付けずに1つだけ返してください。"
-            + $"どれにも当てはまらない場合は「{TaskClassifier.Fallback}」と返してください。";
+            "あなたは未来ガジェット研究所のタスクを分類する係です。"
+            + "渡されたタスクがどの分野のものかを判断し、次の候補から最も近いものを1つだけ選んでください。\n\n"
+            + guide
+            + "\n\n候補の名前をそのまま、余計な記号や説明を付けずに1つだけ返してください。"
+            + $"どれにも当てはまらない場合だけ「{TaskClassifier.Fallback}」と返してください。";
 
         // 長い説明文は先頭だけで足りる。入力を絞って費用と遅延を抑える。
         var trimmed = description.Length > 300 ? description[..300] : description;
