@@ -1244,6 +1244,17 @@ class _TodoBoardState extends State<_TodoBoard> {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
+                  const SizedBox(width: 6),
+                  // 「今週これだけやった」が一目で入るようにする。
+                  if (_completedWithinWeek(tasks) > 0)
+                    Text(
+                      '今週 ${_completedWithinWeek(tasks)}件',
+                      style: TextStyle(
+                        color: widget.color,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   const Spacer(),
                   Text(
                     '$done/${tasks.length}  残り${remaining.length}件',
@@ -1318,6 +1329,8 @@ class _TodoBoardState extends State<_TodoBoard> {
               ],
               if (completed.isNotEmpty) ...[
                 _completedHeader(completed.length),
+                // 一日ぶん働いた証拠が分野ごとに見えるようにする。
+                _completedByPhase(completed),
                 if (!_completedCollapsed)
                   for (final task in completed) _completedTaskRow(task),
               ],
@@ -1326,6 +1339,58 @@ class _TodoBoardState extends State<_TodoBoard> {
         ),
       ],
     );
+  }
+
+  /// 完了したタスクを分野ごとに数えて並べる。分類は一覧と同じ _phase を使う。
+  Widget _completedByPhase(List<TodoItem> completed) {
+    final counts = <String, int>{};
+    for (final task in completed) {
+      final phase = _phase(task);
+      counts[phase] = (counts[phase] ?? 0) + 1;
+    }
+    if (counts.isEmpty) return const SizedBox.shrink();
+
+    // 多い順に並べる。同数なら名前順で安定させる。
+    final entries = counts.entries.toList()
+      ..sort((a, b) {
+        final byCount = b.value.compareTo(a.value);
+        return byCount != 0 ? byCount : a.key.compareTo(b.key);
+      });
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 12, 8),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 4,
+        children: [
+          for (final entry in entries)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.white10,
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                '${entry.key} ${entry.value}',
+                style: const TextStyle(color: Colors.white54, fontSize: 10),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 直近7日で完了した件数。今日やったことが数に入る手応えを出す。
+  static int _completedWithinWeek(List<TodoItem> tasks) {
+    // UTCのまま比較すると日付の境界がずれるので、必ずローカルへ寄せる。
+    final since = DateTime.now().subtract(const Duration(days: 7));
+    var count = 0;
+    for (final task in tasks) {
+      if (task.status != 'completed') continue;
+      final at = task.completedAt?.toLocal();
+      if (at != null && at.isAfter(since)) count++;
+    }
+    return count;
   }
 
   Widget _completedHeader(int count) {
