@@ -82,6 +82,8 @@ class WsServer
             foreach (var task in persisted.Tasks)
                 _tasks[task.Id] = task;
             _taskOrder.AddRange(persisted.Order);
+            // 分類より先に説明文を埋める。分類の判断材料にもなる。
+            BackfillDescriptionsFromHookLogLocked();
             _lastTodos = BuildTodosLocked();
             PersistTaskStateLocked();
         }
@@ -687,6 +689,82 @@ class WsServer
 
         // 語彙の外が返っても必ず内側へ寄せる。ここが表記ゆれの最後の砦。
         return TaskClassifier.ToVocabulary(reply?.Trim()) ?? TaskClassifier.Fallback;
+    }
+
+    /// <summary>
+    /// 説明文を持たないタスクを、フックのダンプログから埋め直す。
+    ///
+    /// task_description を読むようにしたのは途中からなので、それ以前に作られたタスクには
+    /// 説明文が無く、詳細ページが「まだ届いていません」ばかりになる。
+    /// トレイは受け取ったペイロードを task_hook_dump.log に残しているので、そこから拾える。
+    ///
+    /// 同時に SplitTaskDescription を通すため、飲み込まれた activeForm もここで復元される。
+    /// _taskStateGate を保持した状態で呼ぶこと。
+    /// </summary>
+    private void BackfillDescriptionsFromHookLogLocked()
+    {
+        try
+        {
+            if (!File.Exists(TaskHookLog.FilePath)) return;
+
+            var recovered = new Dictionary<string, (string Description, string? ActiveForm)>(
+                StringComparer.Ordinal);
+
+            foreach (var line in File.ReadAllLines(TaskHookLog.FilePath))
+            {
+                // 行頭の "[タイムスタンプ] " を落としてからJSONとして読む。
+                var start = line.IndexOf("] ", StringComparison.Ordinal);
+                if (start < 0) continue;
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(line[(start + 2)..]);
+                    var root = doc.RootElement;
+                    var sessionId = GetHookString(root, "session_id");
+                    var taskId = GetHookTaskId(root);
+                    var rawDescription = GetHookString(root, "task_description");
+                    if (string.IsNullOrWhiteSpace(sessionId)
+                        || !TaskStateStore.IsClaudeTaskId(taskId)
+                        || string.IsNullOrWhiteSpace(rawDescription))
+                    {
+                        continue;
+                    }
+                    var id = TaskStateStore.MakeClaudeTaskId(sessionId!, taskId!);
+                    recovered[id] = SplitTaskDescription(rawDescription!);
+                }
+                catch (JsonException)
+                {
+                    // 壊れた行は飛ばす。1行のせいで全体を諦めない。
+                }
+            }
+
+            var filled = 0;
+            foreach (var id in _taskOrder.ToArray())
+            {
+                if (!_tasks.TryGetValue(id, out var task)) continue;
+                if (task.Description.Length > 0) continue;
+                if (!recovered.TryGetValue(id, out var found)) continue;
+
+                _tasks[id] = task with
+                {
+                    Description = found.Description,
+                    // 件名で代用されていた場合だけ、復元したactiveFormで置き換える。
+                    ActiveForm = task.ActiveForm == task.Content && found.ActiveForm is not null
+                        ? found.ActiveForm
+                        : task.ActiveForm,
+                };
+                filled++;
+            }
+
+            if (filled > 0)
+                ErrorLog.Append(
+                    "BackfillDescriptions",
+                    new InvalidOperationException($"説明文を{filled}件復元しました"));
+        }
+        catch (Exception ex)
+        {
+            ErrorLog.Append("BackfillDescriptionsFromHookLog", ex);
+        }
     }
 
     /// <summary>
