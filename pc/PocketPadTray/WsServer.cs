@@ -420,11 +420,14 @@ class WsServer
                 var activeForm = TakePendingActiveFormLocked(sessionId!, subject)
                     ?? recoveredActiveForm
                     ?? subject;
+                // ルールで拾えた分はここで決まる。決まらなかったものは後でAIに回す。
+                var (phase, priority) = TaskClassifier.FromSubject(subject);
                 if (!_tasks.ContainsKey(globalId))
                     _taskOrder.Add(globalId);
                 _tasks[globalId] = new TaskRecord(
                     globalId, subject, activeForm, "pending",
-                    "claude-code", sessionId, now, now, null, description);
+                    "claude-code", sessionId, now, now, null, description,
+                    phase ?? "", priority ?? "");
             }
             else if (_tasks.TryGetValue(globalId, out var task))
             {
@@ -646,6 +649,8 @@ class WsServer
                 status = task.Status,
                 activeForm = task.ActiveForm,
                 description = task.Description,
+                phase = task.Phase,
+                priority = task.Priority,
                 source = task.Source,
                 createdUtc = task.CreatedUtc,
                 updatedUtc = task.UpdatedUtc,

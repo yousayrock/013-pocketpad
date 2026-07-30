@@ -54,6 +54,8 @@ class TodoItem {
     this.id = '',
     this.description = '',
     this.source = '',
+    this.phase = '',
+    this.priority = '',
     this.createdAt,
     this.updatedAt,
     this.completedAt,
@@ -66,10 +68,18 @@ class TodoItem {
     id: (j['id'] as String?) ?? '',
     description: (j['description'] as String?) ?? '',
     source: (j['source'] as String?) ?? '',
+    phase: (j['phase'] as String?) ?? '',
+    priority: (j['priority'] as String?) ?? '',
     createdAt: DateTime.tryParse((j['createdUtc'] as String?) ?? ''),
     updatedAt: DateTime.tryParse((j['updatedUtc'] as String?) ?? ''),
     completedAt: DateTime.tryParse((j['completedUtc'] as String?) ?? ''),
   );
+
+  /// PC側が決めた分類。届かない古いデータでは空になり、件名の接頭辞から拾う。
+  final String phase;
+
+  /// PC側が決めた優先度（P1/P2/P3）。空なら件名の接頭辞から拾う。
+  final String priority;
 
   /// 全体で一意なID。古いPC側からは届かないので既定は空。
   final String id;
@@ -1154,11 +1164,14 @@ class _TodoBoardState extends State<_TodoBoard> {
   bool _completedCollapsed = true;
 
   static String _phase(TodoItem task) {
+    // PC側が決めた分類を優先する。届かない古いデータは件名の接頭辞から拾う。
+    if (task.phase.isNotEmpty) return task.phase;
     final value = _prefix.firstMatch(task.content)?.group(1)?.trim();
     return value == null || value.isEmpty ? '未分類' : value;
   }
 
   static String? _priority(TodoItem task) {
+    if (task.priority.isNotEmpty) return task.priority.toUpperCase();
     final match = _prefix.firstMatch(task.content);
     return (match?.group(2) ?? match?.group(3))?.toUpperCase();
   }

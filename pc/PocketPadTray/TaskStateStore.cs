@@ -13,7 +13,11 @@ record TaskRecord(
     DateTime UpdatedUtc,
     DateTime? CompletedUtc,
     // 既存データには無い項目なので既定値を持たせる。読み込みでも欠落を許容する。
-    string Description = "");
+    string Description = "",
+    // 分類（TaskClassifier.Vocabulary のいずれか）。未分類なら空。
+    string Phase = "",
+    // 優先度（P1/P2/P3）。未設定なら空。
+    string Priority = "");
 
 record PersistedTaskState(List<TaskRecord> Tasks, List<string> Order);
 
@@ -80,6 +84,8 @@ static class TaskStateStore
                     content = t.Content,
                     activeForm = t.ActiveForm,
                     description = t.Description,
+                    phase = t.Phase,
+                    priority = t.Priority,
                     status = t.Status,
                     source = t.Source,
                     sessionId = t.SessionId,
@@ -286,10 +292,12 @@ static class TaskStateStore
             return false;
         }
 
-        // descriptionは後から足した項目なので、無くても読み込みを失敗させない。
+        // description/phase/priorityは後から足した項目なので、無くても読み込みを失敗させない。
         var description = TryGetString(root, "description", out var descriptionValue)
             ? descriptionValue
             : "";
+        var phase = TryGetString(root, "phase", out var phaseValue) ? phaseValue : "";
+        var priority = TryGetString(root, "priority", out var priorityValue) ? priorityValue : "";
 
         task = new TaskRecord(
             id,
@@ -301,7 +309,9 @@ static class TaskStateStore
             createdUtc,
             updatedUtc,
             completedUtc,
-            description);
+            description,
+            phase,
+            priority);
         return true;
     }
 
