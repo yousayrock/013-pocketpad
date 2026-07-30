@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
@@ -66,6 +67,15 @@ class PocketPadApp extends StatelessWidget {
     return MaterialApp(
       title: 'PocketPad',
       debugShowCheckedModeBanner: false,
+      // 日本語を明示しないと、CJKの字形が中国語側に解決されて漢字が
+      // 簡体字の形で表示される。文字コードは正しいのに見た目だけ崩れる。
+      locale: const Locale('ja', 'JP'),
+      supportedLocales: const [Locale('ja', 'JP')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       theme: ThemeData(
         brightness: Brightness.dark,
         scaffoldBackgroundColor: kBg,
