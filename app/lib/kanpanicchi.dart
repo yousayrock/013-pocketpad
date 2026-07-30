@@ -24,6 +24,11 @@ enum ConnKind { lan, remote }
 /// （ユーザーが好きな名前に変えられるので、これはあくまで初期値）。
 const kCharacterName = 'かんぱに';
 
+/// 表示名の保存先。天国（初回の導入画面）で決めた名前もここへ入れる。
+/// **このキーの有無が「もう天国を通ったか」の判定を兼ねている。**
+/// 専用のフラグを別に持つと必ず食い違うので、真実はここ一箇所に置く。
+const kDisplayNameKey = 'kanpanicchi_display_name';
+
 /// PC側のPreToolUseフックから届いた1件のツール活動（`claude_activity`）。
 class ClaudeActivity {
   ClaudeActivity({required this.tool, required this.detail})
@@ -563,8 +568,11 @@ const _defaultSpritePalette = <String, Color>{
   '0': Colors.black,
 };
 
-class _PixelSprite extends StatelessWidget {
-  const _PixelSprite({
+/// ドット絵を矩形の塗りだけで描く。行数・列数は `rows` から自前で数えるので、
+/// 7×7に限らずどんな大きさでも描ける（天国の天使長はこれで大きく描いている）。
+class PixelSprite extends StatelessWidget {
+  const PixelSprite({
+    super.key,
     required this.rows,
     required this.glow,
     required this.palette,
@@ -818,7 +826,7 @@ class _ArchivePageState extends State<_ArchivePage> {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          _PixelSprite(
+                          PixelSprite(
                             rows: entry.stand,
                             glow: widget.color,
                             palette: entry.palette,
@@ -931,7 +939,7 @@ class _ArchiveDetailSheetState extends State<_ArchiveDetailSheet> {
                     color: widget.color.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: _PixelSprite(
+                  child: PixelSprite(
                     rows: rows,
                     glow: widget.color,
                     palette: detail.palette,
@@ -1080,7 +1088,7 @@ class _StatsHeader extends StatelessWidget {
                 border: Border.all(color: color.withValues(alpha: 0.5)),
               ),
               child: FittedBox(
-                child: _PixelSprite(
+                child: PixelSprite(
                   rows: character.stand,
                   glow: color,
                   palette: character.palette,
@@ -2380,7 +2388,6 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
   );
   String? _marqueeLabelSeen;
   int _marqueeGeneration = 0;
-  static const _kNameKey = 'kanpanicchi_display_name';
   String _displayName = kCharacterName;
 
   @override
@@ -2399,7 +2406,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
       p.remove('kanpanicchi_xp');
       p.remove('kanpanicchi_lifetime_events');
       setState(() {
-        final savedName = p.getString(_kNameKey);
+        final savedName = p.getString(kDisplayNameKey);
         if (savedName != null && savedName.isNotEmpty) _displayName = savedName;
       });
     });
@@ -2436,7 +2443,9 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
     if (result == null) return;
     final name = result.trim().isEmpty ? kCharacterName : result.trim();
     setState(() => _displayName = name);
-    SharedPreferences.getInstance().then((p) => p.setString(_kNameKey, name));
+    SharedPreferences.getInstance().then(
+      (p) => p.setString(kDisplayNameKey, name),
+    );
   }
 
   /// たまごっちらしい「生きてる感」のための瞬き。数秒おきに一瞬だけ目を閉じる。
@@ -2998,7 +3007,7 @@ class _KanpanicchiPanelState extends State<KanpanicchiPanel>
                                                       child: child,
                                                     );
                                                   },
-                                                  child: _PixelSprite(
+                                                  child: PixelSprite(
                                                     // 7列×8行なので 49×56px。
                                                     pixelSize: 7.0,
                                                     rows:

@@ -13,6 +13,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'kanpanicchi.dart';
 import 'claude_notify_service.dart';
+import 'heaven.dart';
 import 'launcher.dart';
 import 'settings.dart';
 import 'settings_screen.dart';
@@ -85,8 +86,47 @@ class PocketPadApp extends StatelessWidget {
           surface: Color(0xFF0A1020),
         ),
       ),
-      home: const ConnectScreen(),
+      home: const _Entry(),
     );
+  }
+}
+
+/// 起動時の入口。まだ天国を通っていなければ天国を、通っていれば世界を出す。
+///
+/// 判定はSharedPreferencesの読み込みなので一瞬だけ結果が無い。その間は
+/// 背景だけを出す——ここで接続画面をちらつかせると、初回に世界を先に
+/// 見せてしまうことになる（天国は「最初に見る場所」でなければ意味がない）。
+class _Entry extends StatefulWidget {
+  const _Entry();
+
+  @override
+  State<_Entry> createState() => _EntryState();
+}
+
+class _EntryState extends State<_Entry> {
+  bool? _showHeaven;
+
+  @override
+  void initState() {
+    super.initState();
+    HeavenPage.shouldShow().then((show) {
+      if (!mounted) return;
+      setState(() => _showHeaven = show);
+    }).catchError((Object e) {
+      // 判定に失敗したら世界へ通す。天国が出ないのは残念だが、
+      // ここで止めてアプリに入れなくなるほうがずっと悪い。
+      logAppError('heaven.shouldShow', e.toString());
+      if (!mounted) return;
+      setState(() => _showHeaven = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final show = _showHeaven;
+    if (show == null) return const ColoredBox(color: kBg);
+    if (!show) return const ConnectScreen();
+    return HeavenPage(onDone: () => setState(() => _showHeaven = false));
   }
 }
 
