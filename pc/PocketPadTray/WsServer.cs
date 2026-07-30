@@ -85,6 +85,9 @@ class WsServer
             _lastTodos = BuildTodosLocked();
             PersistTaskStateLocked();
         }
+
+        // 分類が空のまま残っているタスクを、起動後に少しずつ埋める。
+        QueueBackfillClassification();
     }
 
     /// <summary>_taskStateGateを保持した状態で呼ぶこと。</summary>
@@ -411,6 +414,9 @@ class WsServer
         var (description, recoveredActiveForm) =
             SplitTaskDescription(GetHookString(root, "task_description") ?? "");
 
+        var needsClassification = false;
+        List<object> todos;
+
         lock (_taskStateGate)
         {
             var now = DateTime.UtcNow;
@@ -422,6 +428,7 @@ class WsServer
                     ?? subject;
                 // ルールで拾えた分はここで決まる。決まらなかったものは後でAIに回す。
                 var (phase, priority) = TaskClassifier.FromSubject(subject);
+                needsClassification = phase is null;
                 if (!_tasks.ContainsKey(globalId))
                     _taskOrder.Add(globalId);
                 _tasks[globalId] = new TaskRecord(
@@ -444,8 +451,14 @@ class WsServer
                 };
             }
 
-            return SnapshotTodosLocked();
+            todos = SnapshotTodosLocked();
         }
+
+        // AI呼び出しはロックの外で、フックの応答も待たせずに投げる。
+        if (needsClassification)
+            QueueTaskClassification(globalId, subject, description);
+
+        return todos;
     }
 
     /// <summary>
@@ -608,6 +621,118 @@ class WsServer
         if (!_pendingActiveForms.Remove(key, out var activeForm))
             return null;
         return activeForm;
+    }
+
+    /// <summary>
+    /// ルールで分類が決まらなかったタスクをAIに回す。フックの応答を待たせないよう
+    /// 投げっぱなしにし、結果が出たら更新してスマホへ配信する。
+    /// 分類できなくてもタスクは通常どおり残る（分類はあくまで付加情報）。
+    /// </summary>
+    private void QueueTaskClassification(string globalId, string subject, string description)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var phase = await ClassifyTaskPhaseAsync(subject, description);
+                if (phase is null) return;
+
+                List<object>? todos = null;
+                lock (_taskStateGate)
+                {
+                    if (!_tasks.TryGetValue(globalId, out var task)) return;
+                    // 待っている間に別経路で決まっていたら上書きしない。
+                    if (task.Phase.Length > 0) return;
+                    _tasks[globalId] = task with { Phase = phase };
+                    todos = SnapshotTodosLocked();
+                }
+                if (todos is not null) await PushClaudeTodosAsync(todos);
+            }
+            catch (Exception ex)
+            {
+                ErrorLog.Append("QueueTaskClassification", ex);
+            }
+        });
+    }
+
+    /// <summary>
+    /// 件名と説明文から分類を1つ選ばせる。返り値は必ず語彙のいずれか。
+    /// AIが使えないときは null を返し、分類を空のままにする
+    /// （全部「その他」で埋めると誤った分類が定着してしまうため）。
+    /// </summary>
+    private async Task<string?> ClassifyTaskPhaseAsync(string subject, string description)
+    {
+        var settings = HaikuSettingsStore.Load();
+        if (!settings.Available) return null;
+
+        var vocabulary = string.Join(" / ", TaskClassifier.Vocabulary);
+        var system =
+            "あなたはタスクを分類する係です。渡されたタスクがどの分野のものかを判断し、"
+            + $"次の候補のうち最も近いものを1つだけ選んでください。\n候補: {vocabulary}\n"
+            + "候補の言葉をそのまま、余計な記号や説明を付けずに1つだけ返してください。"
+            + $"どれにも当てはまらない場合は「{TaskClassifier.Fallback}」と返してください。";
+
+        // 長い説明文は先頭だけで足りる。入力を絞って費用と遅延を抑える。
+        var trimmed = description.Length > 300 ? description[..300] : description;
+        var user = $"件名: {subject}\n説明: {trimmed}";
+
+        var reply = await CallHaikuAsync(settings.ApiKey!, system, user, 32);
+
+        // 語彙の外が返っても必ず内側へ寄せる。ここが表記ゆれの最後の砦。
+        return TaskClassifier.ToVocabulary(reply?.Trim()) ?? TaskClassifier.Fallback;
+    }
+
+    /// <summary>
+    /// 分類が空のまま残っているタスクを、起動時に少しずつ埋める。
+    /// 一度に大量へ投げないよう間隔を空ける。
+    /// </summary>
+    private void QueueBackfillClassification()
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (!HaikuSettingsStore.Load().Available) return;
+
+                List<(string Id, string Subject, string Description)> pending;
+                lock (_taskStateGate)
+                {
+                    pending = _taskOrder
+                        .Where(_tasks.ContainsKey)
+                        .Select(id => _tasks[id])
+                        .Where(t => t.Phase.Length == 0)
+                        .Select(t => (t.Id, t.Content, t.Description))
+                        .ToList();
+                }
+
+                foreach (var (id, subject, description) in pending)
+                {
+                    // ルールで拾えるものはAIを呼ばずに済ませる。
+                    var (phase, priority) = TaskClassifier.FromSubject(subject);
+                    phase ??= await ClassifyTaskPhaseAsync(subject, description);
+                    if (phase is null) return;
+
+                    List<object>? todos = null;
+                    lock (_taskStateGate)
+                    {
+                        if (!_tasks.TryGetValue(id, out var task) || task.Phase.Length > 0)
+                            continue;
+                        _tasks[id] = task with
+                        {
+                            Phase = phase,
+                            Priority = task.Priority.Length > 0 ? task.Priority : priority ?? "",
+                        };
+                        todos = SnapshotTodosLocked();
+                    }
+                    if (todos is not null) await PushClaudeTodosAsync(todos);
+                    await Task.Delay(TimeSpan.FromSeconds(1));
+                }
+            }
+            catch (Exception ex)
+            {
+                ErrorLog.Append("QueueBackfillClassification", ex);
+            }
+        });
     }
 
     private static string? GetHookString(JsonElement root, string name) =>
