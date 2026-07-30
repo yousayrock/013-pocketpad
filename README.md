@@ -149,8 +149,16 @@ flutter run                     # USB接続した実機で直接起動
 - [x] PC設定ダッシュボード（ブラウザ編集・プリセット約50種・スマホと双方向同期）
 - [x] PCスタートアップ登録（トレイ右クリック →「Windows起動時に自動起動」）
 - [ ] FF11用プロファイル / プロファイル自動切替 / iPhone対応（Phase2以降）
-- [ ] **人生を育てるアプリへ** — 行動をAIが読んで世界が育ち、今日の自分が図鑑の一枚になる。
-  目的と原則は [docs/VISION.md](docs/VISION.md) を参照
+- [ ] **人生を育てるアプリへ** — 行動をAIが読んで世界が育ち、今日の自分が図鑑の一枚になる
+
+### 設計文書
+
+| 文書 | 中身 |
+|---|---|
+| [docs/VISION.md](docs/VISION.md) | なぜ存在するか。世界観と、変えない4つの原則 |
+| [docs/PHILOSOPHY.md](docs/PHILOSOPHY.md) | 判断の基準、人とAIとCodexの役割分担 |
+| [docs/PRODUCT.md](docs/PRODUCT.md) | 誰に何を届けるか、MVP、ロードマップ、現在地 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 実装の形と技術判断 |
 
 > ⚠️ **アンチチート搭載ゲーム（Valorant / Apex等）では使用しないでください。** 合成入力が検出されアカウント制裁のリスクがあります。FF11・Minecraft等では問題ありません。
 
