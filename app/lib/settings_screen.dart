@@ -10,17 +10,9 @@ class SettingsScreen extends StatefulWidget {
   const SettingsScreen({
     super.key,
     required this.settings,
-    required this.claudeNotifyEnabled,
-    required this.onClaudeNotifyChanged,
   });
 
   final AppSettings settings;
-
-  /// Claude Code通知（音・バイブ・フラッシュ）のON/OFF。
-  /// デバイスローカルの状態でありPC同期設定には含まれないため、
-  /// AppSettingsとは別に受け渡す。
-  final bool claudeNotifyEnabled;
-  final ValueChanged<bool> onClaudeNotifyChanged;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -28,18 +20,6 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   AppSettings get s => widget.settings;
-
-  // widget.claudeNotifyEnabledはこの画面をpushした時点の値で固定されており、
-  // 親（TrackpadScreen）側のsetStateだけではこの画面の見た目が更新されない
-  // （AppSettingsはオブジェクト直接書き換えなので問題ないが、こちらは単純な
-  // bool値+コールバックの受け渡しのため）。ローカルにも状態を持つ。
-  late bool _claudeNotifyEnabled;
-
-  @override
-  void initState() {
-    super.initState();
-    _claudeNotifyEnabled = widget.claudeNotifyEnabled;
-  }
 
   void _save() {
     s.save();
@@ -128,20 +108,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onChanged: s.save,
                       )));
               setState(() {});
-            },
-          ),
-          _header('Claude Code'),
-          SwitchListTile(
-            value: _claudeNotifyEnabled,
-            activeThumbColor: _kAccent,
-            tileColor: Colors.transparent,
-            title: const Text('作業完了・承認待ちの通知'),
-            subtitle: const Text('音・バイブ・画面フラッシュで知らせます',
-                style: TextStyle(fontSize: 12)),
-            secondary: const Icon(Icons.smart_toy, color: Colors.white38),
-            onChanged: (v) {
-              setState(() => _claudeNotifyEnabled = v);
-              widget.onClaudeNotifyChanged(v);
             },
           ),
           const Divider(height: 32),

@@ -41,13 +41,6 @@ WebSocket 1本で全通信を行う。**テキストフレーム＝JSON**（制�
 | `screenshot_error` | PC→📱 | なし | キャプチャ失敗 |
 | `macro` | 📱→PC | `steps` [{type: shortcut/text/launch/delay, ...}] | ステップを順次実行。delayは `ms` |
 | `power` | 📱→PC | `action` (sleep/shutdown/restart) | PC電源操作。スマホ側で確認ダイアログを挟むこと |
-| `claude_notify` | PC→📱 | `event` (stop/notification), `message` | Claude Codeフック(Stop/Notification)発火の通知。`POST /api/claude-notify`経由でPCが受け取り中継する |
-| `claude_activity` | PC→📱 | `tool` (Bash/Edit/Read/...等のツール名), `detail` (ファイル名/コマンド等の短い対象、空文字あり) | Claude Codeフック(PreToolUse)発火のツール活動通知。`POST /api/claude-activity`経由でPCが受け取り中継する。「かんぱにっち」ページのアバターがこれで反応する |
-| `claude_activity_comment` | PC→📱 | `text` | かんぱにっちのHaiku実況。PC側が`claude_activity`受信時にClaude Haiku APIで柔らかい日本語一文を生成し、少し遅れて届く（`ANTHROPIC_API_KEY`未設定時は送られない） |
-| `claude_todos` | PC→📱 | `todos` [{content, status, activeForm}] | Claude CodeのTodoWrite内容。statusは pending/in_progress/completed |
-| `claude_todos_get` | 📱→PC | なし | 接続直後に送る（config_getと同じスマホ主導方式）。PCが直近のTodoWriteを覚えていれば`claude_todos`が返る |
-| `file_transfer` | 📱→PC | `filename`, `data` (base64) | かんぱにっちのサーバー室からのファイル送信。PCは `Downloads\PocketPad` にサニタイズ済みファイル名で保存（同名は連番付与、12MB上限） |
-| `file_transfer_result` | PC→📱 | `ok`, `filename`（成功時） | file_transferの結果通知 |
 
 ### 状態
 
@@ -93,8 +86,6 @@ PC側Kestrel（ポート9013）が配信。**localhost以外からのアクセ�
 | `GET /api/config` | 保存済み設定JSON。未保存なら404 |
 | `PUT /api/config` | 設定を検証して保存し、接続中のスマホへ `config` をプッシュ。応答 `{ok, pushed}` |
 | `GET /api/status` | `{connected: bool}` スマホ接続状態 |
-| `POST /api/claude-notify` | Claude Codeフックスクリプトからの通知中継用。body `{event, message}` → 接続中スマホへ`claude_notify`をプッシュ。応答 `{ok, pushed}` |
-| `POST /api/claude-activity` | Claude CodeのPreToolUseフックからのツール活動中継用。body `{tool, detail}` → 接続中スマホへ`claude_activity`をプッシュ。応答 `{ok, pushed}` |
 
 ## バイナリフレーム（高頻度入力）
 

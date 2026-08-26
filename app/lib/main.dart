@@ -8,8 +8,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-import 'kanpanicchi.dart';
-import 'claude_notify_service.dart';
 import 'launcher.dart';
 import 'settings.dart';
 import 'settings_screen.dart';
@@ -23,7 +21,6 @@ const kMagenta = Color(0xFFFF006E);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  initClaudeNotifyService();
   runApp(const PocketPadApp());
 }
 
@@ -480,28 +477,16 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
   /// PCからのconfigを適用済みか。ローカルload完了が後から来ても上書きしない。
   bool _remoteConfigApplied = false;
 
-  bool _claudeNotifyEnabled = true;
-  ClaudeActivity? _lastClaudeActivity;
-  ClaudeNotifyEvent? _lastClaudeNotifyEvent;
-  List<TodoItem> _lastTodos = [];
-  ActivityComment? _lastActivityComment;
   final SpeechToText _speech = SpeechToText();
   bool _speechAvailable = false;
   bool _micListening = false;
   String _micLastWords = '';
   bool _micSent = false;
-  static const _claudeNotifyPrefsKey = 'claude_notify_enabled';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    SharedPreferences.getInstance().then((p) {
-      if (!mounted) return;
-      setState(() =>
-          _claudeNotifyEnabled = p.getBool(_claudeNotifyPrefsKey) ?? true);
-    });
-    setupClaudeNotifications().then((_) => startClaudeKeepAliveService());
     _settingsFuture = AppSettings.load();
     _settingsFuture.then((s) {
       if (!mounted || _remoteConfigApplied) return;
@@ -529,9 +514,6 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
     // 設定同期はスマホ主導（listen登録後に送るので応答を取りこぼさない）。
     // PCに保存があれば config、なければ config_request が返る。
     _sendJson({'type': 'config_get'});
-    // かんぱにっちのTODOも同じ理由でスマホ主導で取りに行く
-    // （PCが直近のTodoWrite内容を覚えていれば claude_todos が返る）。
-    _sendJson({'type': 'claude_todos_get'});
   }
 
   /// PCからの受信処理。スクショ結果を受け取ったらプレビュー画面へ。
@@ -576,69 +558,7 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
       _settingsFuture.then((_) {
         if (mounted) _pushConfig(_settings.toJson());
       });
-    } else if (j['type'] == 'claude_notify') {
-      // Claude Codeページ（コントローラーUI）は廃止したが、Claude Code純正の
-      // Remote Controlを使わずスマホを見ていない時に気づけるよう、通知アラート
-      // （音+バイブ+フラッシュ／バックグラウンド時はシステム通知）だけは残す。
-      final event = (j['event'] as String?) ?? '';
-      final message = (j['message'] as String?) ?? '';
-      // 「AI社員」ページのアバターにも反映（通知トグルOFFでもページ上の状態は更新する）
-      setState(() => _lastClaudeNotifyEvent = ClaudeNotifyEvent(event: event, message: message));
-      if (_claudeNotifyEnabled) {
-        final foreground =
-            WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
-        if (foreground) {
-          playForegroundAlert(event, message);
-          _flashClaudeAlert(event == 'notification');
-        } else {
-          showClaudeAlert(event, message);
-        }
-      }
-    } else if (j['type'] == 'claude_activity') {
-      final tool = (j['tool'] as String?) ?? '';
-      final detail = (j['detail'] as String?) ?? '';
-      setState(() => _lastClaudeActivity = ClaudeActivity(tool: tool, detail: detail));
-    } else if (j['type'] == 'claude_todos') {
-      final raw = (j['todos'] as List?) ?? const [];
-      setState(() => _lastTodos = [
-            for (final t in raw) TodoItem.fromJson((t as Map).cast<String, dynamic>()),
-          ]);
-    } else if (j['type'] == 'claude_activity_comment') {
-      final text = (j['text'] as String?) ?? '';
-      if (text.isNotEmpty) {
-        setState(() => _lastActivityComment = ActivityComment(text: text));
-      }
-    } else if (j['type'] == 'file_transfer_result' && mounted) {
-      final ok = j['ok'] == true;
-      final filename = (j['filename'] as String?) ?? '';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(
-          ok ? 'PCへ送信しました: $filename' : 'PCへの送信に失敗しました',
-          style: TextStyle(color: ok ? kBg : Colors.white),
-        ),
-        backgroundColor: ok ? kAccent : kMagenta,
-      ));
     }
-  }
-
-  /// Claude Code通知の視覚アラート（フォアグラウンド時の画面フラッシュ）。
-  /// 一瞬でピークまで立ち上げてからフェードアウトする2段階アニメーションで
-  /// はっきり目につくようにする。承認待ち＝マゼンタ、完了＝シアンで色分け。
-  void _flashClaudeAlert(bool isNotification) {
-    final color = isNotification ? kMagenta : kAccent;
-    final overlay = Overlay.of(context);
-    late OverlayEntry entry;
-    entry = OverlayEntry(
-      builder: (context) =>
-          IgnorePointer(child: _ClaudeFlash(color: color, onDone: () => entry.remove())),
-    );
-    overlay.insert(entry);
-  }
-
-  void _setClaudeNotifyEnabled(bool enabled) {
-    setState(() => _claudeNotifyEnabled = enabled);
-    SharedPreferences.getInstance()
-        .then((p) => p.setBool(_claudeNotifyPrefsKey, enabled));
   }
 
   /// 現在設定をPCへ送って保存させる（AppSettings.saveのフックからも呼ばれる）。
@@ -706,7 +626,6 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
     _text.dispose();
     _textFocus.dispose();
     if (_micListening) _speech.stop();
-    stopClaudeKeepAliveService();
     super.dispose();
   }
 
@@ -893,20 +812,6 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
   /// ページIDから本体ウィジェットを生成。
   Widget _buildPage(String id) {
     switch (id) {
-      case 'office':
-        return KanpanicchiPanel(
-          latestActivity: _lastClaudeActivity,
-          latestNotify: _lastClaudeNotifyEvent,
-          todos: _lastTodos,
-          latestComment: _lastActivityComment,
-          onMove: _move,
-          onScroll: _onScrollDelta,
-          onClick: (button, action) =>
-              _sendJson({'type': 'click', 'button': button, 'action': action}),
-          onShortcut: _shortcut,
-          onSendFile: (filename, base64) =>
-              _sendJson({'type': 'file_transfer', 'filename': filename, 'data': base64}),
-        );
       case 'youtube':
         return YoutubePanel(
           onSend: _sendJson,
@@ -1057,8 +962,6 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
       MaterialPageRoute(
         builder: (_) => SettingsScreen(
           settings: _settings,
-          claudeNotifyEnabled: _claudeNotifyEnabled,
-          onClaudeNotifyChanged: _setClaudeNotifyEnabled,
         ),
       ),
     );
@@ -1135,50 +1038,6 @@ class _TrackpadScreenState extends State<TrackpadScreen> with WidgetsBindingObse
       selection: const TextSelection.collapsed(offset: 1),
     );
   }
-}
-
-/// Claude Code通知の画面フラッシュ本体。ピークまで一瞬で立ち上げてからフェードアウトする。
-class _ClaudeFlash extends StatefulWidget {
-  const _ClaudeFlash({required this.color, required this.onDone});
-
-  final Color color;
-  final VoidCallback onDone;
-
-  @override
-  State<_ClaudeFlash> createState() => _ClaudeFlashState();
-}
-
-class _ClaudeFlashState extends State<_ClaudeFlash>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _opacity;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 550),
-    );
-    _opacity = TweenSequence([
-      TweenSequenceItem(tween: Tween(begin: 0.0, end: 0.65), weight: 100),
-      TweenSequenceItem(tween: Tween(begin: 0.65, end: 0.0), weight: 450),
-    ]).animate(_controller);
-    _controller.forward().whenComplete(widget.onDone);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-        animation: _opacity,
-        builder: (context, child) =>
-            Container(color: widget.color.withValues(alpha: _opacity.value)),
-      );
 }
 
 // ─────────────────────────────────────── スクショプレビュー画面
