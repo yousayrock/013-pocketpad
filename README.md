@@ -120,6 +120,32 @@ flutter run                     # USB接続した実機で直接起動
 
 > ⚠️ IPv6オンリー回線（一部のモバイル回線・テザリング）でGradleがタイムアウトする場合は、環境変数 `GRADLE_OPTS=-Djava.net.preferIPv6Addresses=true` を設定してください。本リポジトリの `gradle.properties` には設定済みです。
 
+### 🩹 セットアップでハマりがちなポイント（IPv6オンリー回線・Windows）
+
+- **`gradle.properties` の設定だけでは直らないことがある**
+  `org.gradle.jvmargs` / `systemProp.java.net.preferIPv6Addresses` や、環境変数
+  `GRADLE_OPTS` / `JAVA_OPTS`、`--no-daemon` を試しても、
+  Flutter同梱の内部Gradleプロジェクト（`flutter/packages/flutter_tools/gradle`）が
+  `org.gradle.kotlin.kotlin-dsl` プラグインを取得する際に
+  `Network is unreachable: getsockopt` で失敗し続けることがある
+  （実際にビルド中のjava.exeのコマンドラインを確認したところ、上記のどの方法でも
+  `-Djava.net.preferIPv6Addresses=true` が実プロセスに渡っていなかった）。
+  → その場合は環境変数 **`JAVA_TOOL_OPTIONS=-Djava.net.preferIPv6Addresses=true`**
+  をユーザー環境変数として設定するとJVM起動時に確実に読み込まれる。
+  Android SDKの `sdkmanager` のダウンロードが同様の理由で失敗する場合も同じ変数で解決する。
+- **`flutter doctor` がAndroid SDKのバージョン不足を指摘する**
+  `sdkmanager` で `platform-tools` / `platforms;android-34` / `build-tools;34.0.0` を
+  入れただけでは `Flutter requires Android SDK 36 and the Android BuildTools 28.0.3` と
+  出ることがある。`platforms;android-36` と `build-tools;28.0.3` も追加でインストールする。
+- **`dotnet run` でPocketPadTrayを起動すると管理者昇格に失敗する**
+  `Win32Exception (740): 要求された操作には管理者特権が必要です` で落ちる。
+  `dotnet run` は `Process.Start(UseShellExecute=false)`（生の `CreateProcess`）でexeを
+  起動するため、`app.manifest` の `requireAdministrator` があってもUACのダイアログ自体が
+  出せずに即エラーになる。
+  → `dotnet build` でビルドしてから、`bin/Debug/net8.0-windows/PocketPadTray.exe` を
+  エクスプローラーでダブルクリックするか、PowerShellの `Start-Process` で起動する
+  （どちらも内部的にShellExecute相当を使うためUACダイアログが正しく表示される）。
+
 ## 🏗️ アーキテクチャ
 
 ```
